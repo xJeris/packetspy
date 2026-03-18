@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PacketSpy</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>PacketSpy</h1>
+            <span id="status-badge" class="badge badge-stopped">Stopped</span>
+            <span id="packet-count">0 packets</span>
+        </div>
+        <div class="header-controls">
+            <select id="iface-select">
+                <option value="">Select Interface...</option>
+            </select>
+            <select id="profile-select">
+                <option value="">No Profile</option>
+            </select>
+            <button id="btn-start" class="btn btn-start">Start</button>
+            <button id="btn-stop" class="btn btn-stop" disabled>Stop</button>
+            <button id="btn-clear" class="btn btn-clear">Clear</button>
+            <button id="btn-save" class="btn btn-save">Save PCAP</button>
+            <button id="btn-load" class="btn btn-save">Load PCAP</button>
+            <input type="file" id="pcap-file-input" accept=".pcap,.pcapng,.cap" style="display:none;">
+            <button id="btn-settings" class="btn btn-settings" title="Settings">&#x2699;</button>
+            <button id="btn-shutdown" class="btn btn-shutdown" title="Shutdown PacketSpy">&#x23FB;</button>
+        </div>
+    </header>
+
+    <nav class="tab-bar">
+        <button class="tab active" data-tab="all-traffic">All Traffic</button>
+        <button class="tab" data-tab="by-process">By Process</button>
+        <button class="tab" data-tab="streams">TCP Streams</button>
+        <button class="tab" data-tab="dashboard">Dashboard</button>
+    </nav>
+
+    <div class="main-content">
+    <div class="tab-area">
+
+    <!-- Tab 1: All Traffic -->
+    <div id="tab-all-traffic" class="tab-content active">
+        <div class="table-container">
+            <table id="packet-table">
+                <thead>
+                    <tr>
+                        <th class="col-num">#</th>
+                        <th class="col-time">Time</th>
+                        <th class="col-src">Source</th>
+                        <th class="col-dst">Destination</th>
+                        <th class="col-proto">Protocol</th>
+                        <th class="col-len">Length</th>
+                        <th class="col-proc">Process</th>
+                        <th class="col-info">Info</th>
+                    </tr>
+                </thead>
+                <tbody id="packet-tbody">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Tab 2: By Process -->
+    <div id="tab-by-process" class="tab-content">
+        <div class="split-panel">
+            <div class="process-sidebar" id="process-list">
+                <div class="sidebar-empty">Start a capture to see processes</div>
+            </div>
+            <div class="process-packets">
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="col-num">#</th>
+                                <th class="col-time">Time</th>
+                                <th class="col-src">Source</th>
+                                <th class="col-dst">Destination</th>
+                                <th class="col-proto">Protocol</th>
+                                <th class="col-len">Length</th>
+                                <th class="col-info">Info</th>
+                            </tr>
+                        </thead>
+                        <tbody id="process-packet-tbody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab 3: TCP Streams -->
+    <div id="tab-streams" class="tab-content">
+        <div id="stream-list-view">
+            <div class="stream-controls">
+                <span id="stream-count">0 streams</span>
+                <select id="stream-sort">
+                    <option value="last_seen">Sort: Recent</option>
+                    <option value="bytes">Sort: Bytes</option>
+                    <option value="packets">Sort: Packets</option>
+                </select>
+            </div>
+            <div class="table-container">
+                <table id="stream-table">
+                    <thead>
+                        <tr>
+                            <th class="col-stream-id">#</th>
+                            <th class="col-stream-src">Source</th>
+                            <th class="col-stream-dst">Destination</th>
+                            <th class="col-stream-pkts">Packets</th>
+                            <th class="col-stream-bytes">Bytes</th>
+                            <th class="col-stream-dur">Duration</th>
+                            <th class="col-stream-state">State</th>
+                            <th class="col-stream-proc">Process</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stream-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div id="stream-detail-view" style="display:none;">
+            <div class="stream-detail-header">
+                <button id="stream-back" class="btn btn-clear">&larr; Back</button>
+                <span id="stream-detail-title"></span>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="col-num">#</th>
+                            <th class="col-time">Time</th>
+                            <th class="col-src">Source</th>
+                            <th class="col-dst">Destination</th>
+                            <th class="col-proto">Protocol</th>
+                            <th class="col-len">Length</th>
+                            <th class="col-proc">Process</th>
+                            <th class="col-info">Info</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stream-detail-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab 4: Dashboard -->
+    <div id="tab-dashboard" class="tab-content">
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-card-title">Summary</div>
+                <div id="stats-summary" class="stat-card-body">
+                    <div class="stat-row"><span>Packets</span><span id="dash-total-packets">0</span></div>
+                    <div class="stat-row"><span>Total Bytes</span><span id="dash-total-bytes">0 B</span></div>
+                    <div class="stat-row"><span>Rate</span><span id="dash-rate">0 B/s</span></div>
+                    <div class="stat-row"><span>Elapsed</span><span id="dash-elapsed">0s</span></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Protocols</div>
+                <div id="stats-protocols" class="stat-card-body"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Top Processes</div>
+                <div id="stats-processes" class="stat-card-body"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Top Talkers</div>
+                <div id="stats-talkers" class="stat-card-body"></div>
+            </div>
+        </div>
+    </div>
+
+    </div><!-- /.tab-area -->
+
+    <div id="side-panel" class="side-panel" style="display:none;">
+        <div class="side-panel-header">
+            <span id="side-panel-title">Packet</span>
+            <button id="side-panel-close" class="modal-close">&times;</button>
+        </div>
+        <div class="side-panel-body pkt-detail-body">
+            <div id="side-panel-summary" class="pkt-summary"></div>
+            <div id="side-panel-layers" class="pkt-layers"></div>
+            <div id="side-panel-payload" class="pkt-payload"></div>
+        </div>
+    </div>
+
+    </div><!-- /.main-content -->
+
+    <div id="packet-detail-modal" class="modal-overlay" style="display:none;">
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <span id="pkt-detail-title">Packet</span>
+                <button id="pkt-detail-close" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body pkt-detail-body">
+                <div id="pkt-detail-summary" class="pkt-summary"></div>
+                <div id="pkt-detail-layers" class="pkt-layers"></div>
+                <div id="pkt-detail-payload" class="pkt-payload"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="settings-modal" class="modal-overlay" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <span>Settings</span>
+                <button id="modal-close" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <label class="setting-row">
+                    <input type="checkbox" id="auto-scroll" checked>
+                    <span>Auto-scroll to latest packet</span>
+                </label>
+                <label class="setting-row">
+                    <input type="checkbox" id="auto-clear">
+                    <span>Auto-clear packets on capture start</span>
+                </label>
+                <div class="setting-row setting-row-group">
+                    <span class="setting-group-label">Packet detail view:</span>
+                    <label class="setting-radio">
+                        <input type="radio" name="detail-view" value="modal" id="detail-view-modal" checked>
+                        <span>Modal (overlay)</span>
+                    </label>
+                    <label class="setting-radio">
+                        <input type="radio" name="detail-view" value="panel" id="detail-view-panel">
+                        <span>Side panel</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="load-profile-modal" class="modal-overlay" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <span>Load PCAP</span>
+                <button id="load-profile-close" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="load-filename" style="color:#808080; margin-bottom:12px;"></p>
+                <label class="setting-row">
+                    <span>Apply profile:</span>
+                    <select id="load-profile-select">
+                        <option value="">No Profile</option>
+                    </select>
+                </label>
+                <div style="text-align:right; margin-top:12px;">
+                    <button id="load-confirm" class="btn btn-start">Load</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

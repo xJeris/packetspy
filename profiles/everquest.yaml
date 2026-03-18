@@ -1,0 +1,45 @@
+# EverQuest Network Traffic Profile
+# Used to capture and monitor EQ client/server communication
+
+name: EverQuest
+description: EverQuest game client and server traffic (login, world, zones)
+
+# Process names to match (case-insensitive)
+processes:
+  - eqgame.exe
+
+# Protocol and port definitions
+ports:
+  tcp:
+    - 9000       # Login server
+    - 9001       
+    - 7778       # UCS/Mail
+    - 5998       
+    - 5999       
+    - 3306       # Database (MySQL)
+  udp:
+    - 9000       # Login server
+    - 9001       
+    - 7778       # UCS/Mail
+    - 5998       
+    - 5999       
+
+# Zone server port range — each zone instance binds a port in this range
+port_ranges:
+  udp:
+    - start: 7000
+      end: 7500
+      label: Zone servers
+  tcp:
+    - start: 7000
+      end: 7500
+      label: Zone servers
+
+# Addons — protocol parsers to activate for this profile
+# Each entry matches a filename in the addons/ folder (without .py)
+addons:
+  - eq_session
+
+# BPF filter (auto-generated from ports above, or override manually)
+# Leave blank to auto-generate from the port definitions
+bpf_filter_override: null
