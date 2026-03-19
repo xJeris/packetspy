@@ -2,6 +2,8 @@
 
 A Windows packet sniffer that tracks network traffic by application. Create profiles to monitor specific apps (games, servers, clients) or watch all local network traffic through a browser-based dashboard.
 
+![screenshot](https://raw.githubusercontent.com/xJeris/packetspy/refs/heads/main/sample.png)
+
 ## Features
 
 - **Live packet capture** with Npcap in promiscuous mode
