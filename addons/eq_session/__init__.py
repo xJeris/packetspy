@@ -11,7 +11,10 @@ encode key from OP_SessionResponse handshakes across packets in the same flow.
 
 import struct
 
-from .session_state import SessionState
+from .session_state import (
+    SessionState, frag_start, frag_append, frag_is_complete,
+    frag_pop_complete, frag_save_result, frag_lookup_result,
+)
 from .crc import strip_crc
 from .decompress import decompress_payload
 from .opcodes import lookup as lookup_opcode
@@ -97,16 +100,16 @@ def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
         _parse_session_response(data, fields, packet_info, state, flow_ctx)
         notes = _notes_session_response(data)
     elif opcode_byte == 0x03:
-        count = _parse_combined(data, fields)
+        count = _parse_combined(data, fields, flow_ctx)
         notes = f"OP_Combined ({count} sub-packets)"
     elif opcode_byte == 0x09:
         notes = _parse_packet(data, fields)
     elif opcode_byte == 0x0d:
-        notes = _parse_fragment(data, fields)
+        notes = _parse_fragment(data, fields, flow_ctx)
     elif opcode_byte == 0x15 or opcode_byte == 0x11:
         notes = _parse_ack(data, fields, opcode_name)
     elif opcode_byte == 0x19:
-        count = _parse_combined(data, fields)
+        count = _parse_combined(data, fields, flow_ctx)
         notes = f"OP_AppCombined ({count} sub-packets)"
     else:
         fields.append({"name": "Payload length", "value": f"{len(data) - 2} bytes"})
@@ -168,19 +171,56 @@ def _notes_session_response(payload):
     )
 
 
-def _parse_combined(payload, fields):
+def _parse_combined(payload, fields, flow_ctx=None):
     count = 0
     offset = 2
     data_len = len(payload)
     while offset < data_len:
-        if offset >= data_len:
-            break
         sub_len = payload[offset]
-        offset += 1 + sub_len
+        offset += 1
+        if offset + sub_len > data_len:
+            break
+        sub_data = payload[offset:offset + sub_len]
+        offset += sub_len
         count += 1
+        _parse_sub_packet(sub_data, fields, count, flow_ctx)
     fields.append({"name": "Sub-packets", "value": str(count)})
     fields.append({"name": "Payload length", "value": f"{len(payload) - 2} bytes"})
     return count
+
+
+def _parse_sub_packet(data, fields, index, flow_ctx=None):
+    """Parse a single sub-packet from OP_Combined and append fields."""
+    if len(data) < 2:
+        fields.append({"name": f"Sub {index}", "value": f"{len(data)} bytes (too short)"})
+        return
+
+    # Sub-packets starting with 0x00 are session-layer messages
+    if data[0] == 0x00:
+        opcode_byte = data[1]
+        opcode_name = SESSION_OPCODES.get(opcode_byte)
+        if opcode_name:
+            sub_fields = []
+            if opcode_byte == 0x09:
+                note = _parse_packet(data, sub_fields)
+            elif opcode_byte == 0x0d:
+                note = _parse_fragment(data, sub_fields, flow_ctx)
+            elif opcode_byte in (0x15, 0x11):
+                note = _parse_ack(data, sub_fields, opcode_name)
+            else:
+                note = f"{opcode_name} ({len(data)} bytes)"
+            fields.append({"name": f"Sub {index}", "value": note})
+            for f in sub_fields:
+                fields.append({"name": f"  {f['name']}", "value": f["value"]})
+            return
+
+    # Non-session sub-packet: likely raw app data with 2-byte LE opcode
+    sub_fields = []
+    app_opcode_str = _read_app_opcode(data, sub_fields)
+    if app_opcode_str:
+        fields.append({"name": f"Sub {index}", "value": f"App: {app_opcode_str} ({len(data)} bytes)"})
+    else:
+        fields.append({"name": f"Sub {index}", "value": f"0x{data[0]:02x}... ({len(data)} bytes)"})
 
 
 def _parse_packet(payload, fields):
@@ -224,28 +264,123 @@ def _parse_packet(payload, fields):
     return f"OP_Packet seq={seq}{comp_note}{opcode_note}"
 
 
-def _parse_fragment(payload, fields):
+def _parse_fragment(payload, fields, flow_ctx=None):
+    """Parse OP_Fragment with stateful reassembly via flow_ctx."""
     if len(payload) < 4:
         return "OP_Fragment"
     seq = struct.unpack_from(">H", payload, 2)[0]
     fields.append({"name": "Sequence", "value": str(seq)})
 
+    store = flow_ctx.store if flow_ctx is not None else None
+
+    # Check for a cached reassembly result from a prior processing pass
+    if store is not None:
+        cached = frag_lookup_result(store, seq)
+        if cached:
+            return _show_cached_reassembly(cached, fields, seq)
+
+    # Detect first fragment: has 4-byte total_size field after sequence
     if len(payload) >= 8:
         possible_total = struct.unpack_from(">I", payload, 4)[0]
         if possible_total > len(payload) and possible_total < 1_000_000:
+            frag_data = payload[8:]  # skip [0x00, opcode, seq_hi, seq_lo, total_size(4)]
             fields.append({"name": "Fragment", "value": f"First (total {possible_total} bytes)"})
-            fields.append({"name": "Payload offset", "value": "8 bytes"})
-            fields.append({"name": "Payload length", "value": f"{len(payload) - 8} bytes"})
-            return f"OP_Fragment seq={seq} total={possible_total}B (first)"
-        else:
-            fields.append({"name": "Fragment", "value": "Continuation"})
-            fields.append({"name": "Payload offset", "value": "4 bytes"})
-            fields.append({"name": "Payload length", "value": f"{len(payload) - 4} bytes"})
-            return f"OP_Fragment seq={seq} (continuation)"
+            fields.append({"name": "Payload length", "value": f"{len(frag_data)} bytes"})
 
-    fields.append({"name": "Payload offset", "value": "4 bytes"})
-    fields.append({"name": "Payload length", "value": f"{len(payload) - 4} bytes"})
-    return f"OP_Fragment seq={seq}"
+            # Start reassembly buffer
+            if store is not None:
+                frag_start(store, seq, possible_total, frag_data)
+
+            return f"OP_Fragment seq={seq} total={possible_total}B (first)"
+
+    # Continuation fragment
+    frag_data = payload[4:]  # skip [0x00, opcode, seq_hi, seq_lo]
+
+    if store is not None:
+        buf = frag_append(store, frag_data)
+        if buf is not None:
+            est_total_frags = max(1, -(-buf["total_size"] // max(1, buf["accumulated"] // buf["chunk_count"])))
+            fields.append({
+                "name": "Fragment",
+                "value": f"{buf['chunk_count']}/{est_total_frags}, {buf['accumulated']}/{buf['total_size']} bytes",
+            })
+
+            # Check if reassembly is complete
+            if frag_is_complete(store):
+                reassembled, buf_info = frag_pop_complete(store)
+                if reassembled:
+                    return _finish_reassembly(reassembled, fields, seq, buf_info, store)
+
+            fields.append({"name": "Payload length", "value": f"{len(frag_data)} bytes"})
+            return f"OP_Fragment seq={seq} ({buf['chunk_count']}/{est_total_frags})"
+
+    # No flow context or no active buffer — basic display
+    fields.append({"name": "Fragment", "value": "Continuation"})
+    fields.append({"name": "Payload length", "value": f"{len(frag_data)} bytes"})
+    return f"OP_Fragment seq={seq} (continuation)"
+
+
+def _finish_reassembly(reassembled, fields, seq, buf_info, store=None):
+    """Handle completed fragment reassembly: decompress + app opcode lookup."""
+    fields.append({
+        "name": "Reassembled",
+        "value": f"{buf_info['total_size']} bytes from {buf_info['chunk_count']} fragments",
+    })
+
+    # Decompress the reassembled payload
+    decompressed, was_compressed = decompress_payload(reassembled)
+
+    if was_compressed:
+        fields.append({
+            "name": "Decompressed",
+            "value": f"yes ({len(reassembled) - 1} \u2192 {len(decompressed)} bytes)",
+        })
+
+    # Read app opcode from reassembled + decompressed data
+    app_opcode_str = _read_app_opcode(decompressed, fields)
+
+    fields.append({"name": "Payload length", "value": f"{len(decompressed)} bytes"})
+
+    # Cache the result so any fragment in this group can display it later
+    if store is not None:
+        frag_save_result(store, buf_info["first_seq"], seq, {
+            "app_opcode": app_opcode_str,
+            "total_size": buf_info["total_size"],
+            "chunk_count": buf_info["chunk_count"],
+            "decompressed_size": len(decompressed),
+            "was_compressed": was_compressed,
+        })
+
+    comp_note = ", compressed" if was_compressed else ""
+    opcode_note = f" \u2192 {app_opcode_str}" if app_opcode_str else ""
+    return f"OP_Fragment seq={seq} (complete{comp_note}{opcode_note})"
+
+
+def _show_cached_reassembly(cached, fields, seq):
+    """Display reassembly result from cache for any fragment in a completed group."""
+    app_opcode = cached.get("app_opcode", "?")
+    total_size = cached.get("total_size", 0)
+    chunk_count = cached.get("chunk_count", 0)
+    decompressed_size = cached.get("decompressed_size", 0)
+    was_compressed = cached.get("was_compressed", False)
+    first_seq = cached.get("first_seq", "?")
+    last_seq = cached.get("last_seq", "?")
+
+    fields.append({
+        "name": "Reassembled",
+        "value": f"{total_size} bytes from {chunk_count} fragments (seq {first_seq}\u2013{last_seq})",
+    })
+    if was_compressed:
+        fields.append({
+            "name": "Decompressed",
+            "value": f"yes \u2192 {decompressed_size} bytes",
+        })
+    if app_opcode:
+        fields.append({"name": "App opcode", "value": app_opcode})
+
+    comp_note = ", compressed" if was_compressed else ""
+    opcode_note = f" \u2192 {app_opcode}" if app_opcode else ""
+    return f"OP_Fragment seq={seq} (reassembled{comp_note}{opcode_note})"
 
 
 def _parse_ack(payload, fields, opcode_name):
