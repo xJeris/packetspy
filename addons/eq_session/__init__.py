@@ -4,8 +4,9 @@ Parses the EverQuest (SOE) session protocol layer from raw UDP payloads.
 Identifies session opcodes, sequence numbers, CRC stripping, decompression,
 and application-layer opcode labeling using RoF2 opcode mappings.
 
-This is a stateful addon — init() returns a SessionState that tracks
-CRC byte count and encode key from OP_SessionResponse handshakes.
+This is a stateful addon. It uses flow_ctx.store["eq_session"] (preferred)
+or the legacy init()/SessionState mechanism to track CRC byte count and
+encode key from OP_SessionResponse handshakes across packets in the same flow.
 """
 
 import struct
@@ -46,7 +47,7 @@ def init():
     return SessionState()
 
 
-def parse(payload_bytes, packet_info, state=None):
+def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
     """Parse EQ session protocol header from raw UDP payload bytes.
 
     Returns a dict with fields and notes, or None if not applicable.
@@ -73,8 +74,12 @@ def parse(payload_bytes, packet_info, state=None):
     fields = [{"name": "Opcode", "value": f"{opcode_name} (0x{opcode_byte:02x})"}]
     notes = opcode_name
 
-    # Determine CRC byte count from session state (default 2)
-    session = state.get(packet_info) if state else None
+    # Determine CRC byte count from flow context or legacy session state
+    session = None
+    if flow_ctx is not None:
+        session = flow_ctx.store.get("eq_session")
+    if session is None and state is not None:
+        session = state.get(packet_info)
     crc_bytes = session["crc_bytes"] if session else 2
 
     # Strip CRC from data-carrying opcodes before further parsing
@@ -89,7 +94,7 @@ def parse(payload_bytes, packet_info, state=None):
         _parse_session_request(data, fields)
         notes = _notes_session_request(data)
     elif opcode_byte == 0x02:
-        _parse_session_response(data, fields, packet_info, state)
+        _parse_session_response(data, fields, packet_info, state, flow_ctx)
         notes = _notes_session_response(data)
     elif opcode_byte == 0x03:
         count = _parse_combined(data, fields)
@@ -126,7 +131,7 @@ def _notes_session_request(payload):
     return f"OP_SessionRequest proto={proto_ver} session=0x{session_id:08x}"
 
 
-def _parse_session_response(payload, fields, packet_info, state):
+def _parse_session_response(payload, fields, packet_info, state, flow_ctx=None):
     if len(payload) < 17:
         return
     session_id = struct.unpack_from(">I", payload, 2)[0]
@@ -143,6 +148,9 @@ def _parse_session_response(payload, fields, packet_info, state):
     fields.append({"name": "Max packet size", "value": str(max_pkt)})
 
     # Store session params for future packets in this flow
+    session_data = {"crc_bytes": crc_byte_count, "encode_key": encode_key}
+    if flow_ctx is not None:
+        flow_ctx.store["eq_session"] = session_data
     if state:
         state.update(packet_info, crc_byte_count, encode_key)
 
