@@ -182,6 +182,8 @@ def load_pcap_route():
     engine._packet_counter = 0
     engine.stats.reset()
     engine.stream_tracker.reset()
+    from ..addon_loader import reset_flow_tracker, run_addons
+    reset_flow_tracker()
 
     # Process each packet through the dissection pipeline
     packets = []
@@ -198,6 +200,10 @@ def load_pcap_route():
             stream_id = engine.stream_tracker.process_packet(parsed)
             if stream_id is not None:
                 parsed["stream_id"] = stream_id
+
+        # Run addons so stateful addons accumulate cross-packet state
+        if engine.active_profile:
+            run_addons(pkt, engine.active_profile)
 
         engine.packet_buffer.append(parsed)
         if parsed:
