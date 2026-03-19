@@ -5,6 +5,8 @@ A Windows packet sniffer that tracks network traffic by application. Create prof
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
+![screenshot](https://raw.githubusercontent.com/xJeris/packetspy/refs/heads/main/sample.png)
+
 ## Features
 
 - **Live packet capture** with Npcap in promiscuous mode
