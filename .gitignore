@@ -15,10 +15,3 @@ __pycache__/
 # User-generated
 captures/
 settings.json
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Claude Code
-.claude/
