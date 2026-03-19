@@ -2,6 +2,9 @@
 
 A Windows packet sniffer that tracks network traffic by application. Create profiles to monitor specific apps (games, servers, clients) or watch all local network traffic through a browser-based dashboard.
 
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
 ## Features
 
 - **Live packet capture** with Npcap in promiscuous mode
