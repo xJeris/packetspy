@@ -6,15 +6,28 @@ execute matching addons on packet detail requests.
 
 Addons can be single .py files or packages (folders with __init__.py).
 Addons can optionally define init() for stateful operation.
+
+Each addon's parse() receives:
+  - payload_bytes: raw transport-layer payload
+  - packet_info: dict with src_ip, dst_ip, src_port, dst_port, protocol
+  - state: optional per-addon state object from init()
+  - flow_ctx: optional FlowContext with per-flow metadata and a persistent
+    store dict (flow_ctx.store[addon_id]) for cross-packet state
 """
 
 import importlib.util
+import inspect
 import os
 import sys
 import traceback
 
-# Registry: addon_id -> {"module": module, "info": ADDON_INFO, "state": ...}
+from .flow_context import FlowTracker
+
+# Registry: addon_id -> {"module": module, "info": ADDON_INFO, "state": ..., "accepts_flow_ctx": bool}
 _addons = {}
+
+# Module-level flow tracker shared across all addon invocations
+_flow_tracker = FlowTracker()
 
 
 def discover_addons(addons_dir=None):
@@ -92,7 +105,11 @@ def _register_addon(addon_id, mod):
         print(f"[PacketSpy] Addon {addon_id} has incomplete ADDON_INFO, skipping")
         return
 
-    entry = {"module": mod, "info": info, "state": None}
+    # Check if parse() accepts a flow_ctx parameter
+    sig = inspect.signature(mod.parse)
+    accepts_flow_ctx = "flow_ctx" in sig.parameters
+
+    entry = {"module": mod, "info": info, "state": None, "accepts_flow_ctx": accepts_flow_ctx}
 
     # Optional: stateful addon with init()
     if hasattr(mod, "init"):
@@ -105,6 +122,11 @@ def _register_addon(addon_id, mod):
 def get_registered_addons():
     """Return dict of registered addon IDs to their info."""
     return {aid: data["info"] for aid, data in _addons.items()}
+
+
+def reset_flow_tracker():
+    """Clear all tracked flow contexts. Call when capture restarts."""
+    _flow_tracker.reset()
 
 
 def run_addons(raw_pkt, profile):
@@ -136,6 +158,9 @@ def run_addons(raw_pkt, profile):
         packet_info["src_port"] = raw_pkt[UDP].sport
         packet_info["dst_port"] = raw_pkt[UDP].dport
 
+    # Get or create flow context for this packet's flow
+    flow_ctx = _flow_tracker.get_or_create(packet_info)
+
     results = []
     for addon_id in profile.addons:
         if addon_id not in _addons:
@@ -166,7 +191,12 @@ def run_addons(raw_pkt, profile):
 
         try:
             state = addon["state"]
-            result = addon["module"].parse(payload_bytes, packet_info, state)
+            if addon["accepts_flow_ctx"]:
+                result = addon["module"].parse(
+                    payload_bytes, packet_info, state, flow_ctx=flow_ctx
+                )
+            else:
+                result = addon["module"].parse(payload_bytes, packet_info, state)
             if result is not None:
                 results.append({
                     "name": addon["info"]["name"],

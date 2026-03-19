@@ -50,6 +50,8 @@ class CaptureEngine:
         self._packet_counter = 0
         self.stats.reset()
         self.stream_tracker.reset()
+        from .addon_loader import reset_flow_tracker
+        reset_flow_tracker()
         self._thread = threading.Thread(target=self._sniff_loop, daemon=True)
         self._thread.start()
         self.is_running = True
