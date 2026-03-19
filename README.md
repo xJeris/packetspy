@@ -2,8 +2,6 @@
 
 A Windows packet sniffer that tracks network traffic by application. Create profiles to monitor specific apps (games, servers, clients) or watch all local network traffic through a browser-based dashboard.
 
-![screenshot](https://raw.githubusercontent.com/xJeris/packetspy/refs/heads/main/sample.png)
-
 ## Features
 
 - **Live packet capture** with Npcap in promiscuous mode
@@ -14,7 +12,7 @@ A Windows packet sniffer that tracks network traffic by application. Create prof
 - **TCP stream tracking** — group packets into conversations
 - **Real-time dashboard** — protocol breakdown, top processes, top talkers
 - **PCAP save/load** — save captures in Wireshark-compatible format and load them back for review
-- **Addon system** — pluggable protocol parsers with optional statefulness (e.g., EverQuest session protocol decoder with opcode labeling, CRC stripping, and decompression)
+- **Addon system** — pluggable protocol parsers with per-flow context and optional statefulness (e.g., EverQuest session protocol decoder with opcode labeling, CRC stripping, and decompression)
 - **Browser UI** — dark-themed, tabbed interface served locally via Flask
 
 ## Quick Start
@@ -106,11 +104,13 @@ ADDON_INFO = {
     "protocol": "udp",          # "udp", "tcp", or "any"
 }
 
-def parse(payload_bytes, packet_info, state=None):
+def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
     """
     payload_bytes: raw transport layer payload (bytes)
     packet_info: {"src_ip", "dst_ip", "src_port", "dst_port", "protocol"}
     state: optional state object from init() (None for stateless addons)
+    flow_ctx: optional FlowContext with per-flow metadata and persistent
+              store dict (flow_ctx.store[addon_id]) for cross-packet state
 
     Return {"fields": [{"name": str, "value": str}, ...], "notes": str}
     or None to skip this packet.
@@ -155,6 +155,7 @@ packetspy/
     stats.py              # Live traffic statistics
     tcp_streams.py        # TCP conversation tracker
     addon_loader.py       # Addon discovery and execution
+    flow_context.py       # Per-flow context tracking for addons
     pcap_io.py            # PCAP save/load
     web/
       __init__.py         # Flask app factory

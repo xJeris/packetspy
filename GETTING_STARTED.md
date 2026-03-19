@@ -215,7 +215,7 @@ ADDON_INFO = {
 }
 
 
-def parse(payload_bytes, packet_info, state=None):
+def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
     """Parse the transport layer payload.
 
     Args:
@@ -223,6 +223,8 @@ def parse(payload_bytes, packet_info, state=None):
         packet_info: Dict with keys:
             src_ip, dst_ip, src_port, dst_port, protocol
         state: State object from init() (None for stateless addons).
+        flow_ctx: FlowContext with per-flow metadata and a persistent
+            store dict (flow_ctx.store[addon_id]). None if unavailable.
 
     Returns:
         Dict with "fields" and "notes", or None to skip.
@@ -270,20 +272,30 @@ def init():
     return SessionState()
 
 
-def parse(payload_bytes, packet_info, state=None):
-    """Parse with session awareness."""
+def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
+    """Parse with flow context and session awareness."""
     if not payload_bytes:
         return None
 
-    # Use state to track sessions, sequence numbers, etc.
-    session = state.get_or_create(packet_info)
-    session.packet_count += 1
+    # Use flow_ctx for per-flow state (preferred)
+    if flow_ctx is not None:
+        store = flow_ctx.store.setdefault("my_session", {"packet_count": 0})
+        store["packet_count"] += 1
+        count = store["packet_count"]
+    elif state is not None:
+        # Fallback to legacy init() state
+        session = state.get_or_create(packet_info)
+        session.packet_count += 1
+        count = session.packet_count
+    else:
+        count = 0
 
     return {
         "fields": [
-            {"name": "Session packets", "value": str(session.packet_count)},
+            {"name": "Flow packets", "value": str(flow_ctx.packet_count if flow_ctx else "N/A")},
+            {"name": "Session packets", "value": str(count)},
         ],
-        "notes": "Parsed with session state",
+        "notes": f"Parsed with flow context ({count} session packets)",
     }
 ```
 
@@ -310,12 +322,19 @@ Addons are discovered at startup. After a restart you should see:
 ### Addon contract
 
 - `ADDON_INFO` (dict, required): Must have `name` (str) and `protocol` (str)
-- `parse(payload_bytes, packet_info, state=None)` (function, required): Must return a dict or `None`
+- `parse(payload_bytes, packet_info, state=None, flow_ctx=None)` (function, required): Must return a dict or `None`
 - `init()` (function, optional): Return a state object for stateful addons; passed as 3rd arg to `parse()`
+- `flow_ctx` (optional kwarg): A `FlowContext` object automatically provided per network flow. Contains:
+  - `flow_ctx.flow_key` — normalized 5-tuple identifying the flow
+  - `flow_ctx.packet_count` — total packets seen in this flow
+  - `flow_ctx.first_seen` / `flow_ctx.last_seen` — timestamps
+  - `flow_ctx.store` — dict for addon-private state; use `flow_ctx.store[addon_id]` to persist data across packets in the same flow
+- Addons that don't declare `flow_ctx` in their `parse()` signature still work — it simply won't be passed
 - Return `None` to skip packets your addon doesn't handle
 - The `protocol` field filters which packets your addon sees: `"udp"` means only UDP payloads are passed, `"tcp"` means only TCP, `"any"` means both
 - Addons have no Scapy dependency — they receive raw `bytes` and return plain dicts
 - If an addon raises an exception, it's caught and logged; other addons still run
+- Flow state is automatically cleared when a new capture starts
 
 ### Removing an addon
 
