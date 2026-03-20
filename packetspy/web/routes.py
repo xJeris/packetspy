@@ -139,9 +139,9 @@ def save_pcap():
 
 @bp.route("/api/pcap/load", methods=["POST"])
 def load_pcap_route():
-    """Load a PCAP file and populate the packet buffer."""
-    from ..pcap_io import load_pcap
-    from ..dissect import dissect_packet
+    """Load a PCAP file — saves to temp, returns a load_id for SSE streaming."""
+    import tempfile
+    import uuid
 
     engine = current_app.config["capture_engine"]
 
@@ -153,15 +153,10 @@ def load_pcap_route():
 
     f = request.files["file"]
 
-    # Save to temp location, load with Scapy, then clean up
-    import tempfile
+    # Save to temp location (cleaned up after streaming completes)
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pcap")
-    try:
-        f.save(tmp.name)
-        tmp.close()
-        raw_packets = load_pcap(tmp.name)
-    finally:
-        os.unlink(tmp.name)
+    f.save(tmp.name)
+    tmp.close()
 
     # Apply profile if requested (enables addons on detail view)
     profile_name = request.form.get("profile")
@@ -172,9 +167,34 @@ def load_pcap_route():
         try:
             engine.active_profile = load_profile(f"{profiles_dir}/{profile_name}")
         except ProfileValidationError as e:
+            os.unlink(tmp.name)
             return jsonify({"error": str(e)}), 400
     else:
         engine.active_profile = None
+
+    load_id = uuid.uuid4().hex[:12]
+    _pending_loads = current_app.config.setdefault("_pending_loads", {})
+    _pending_loads[load_id] = {"tmp_path": tmp.name, "filename": f.filename}
+
+    return jsonify({"status": "ready", "load_id": load_id, "filename": f.filename})
+
+
+@bp.route("/api/pcap/load/<load_id>/stream")
+def stream_pcap_load(load_id):
+    """SSE endpoint that streams parsed packets from a pending PCAP load."""
+    from ..pcap_io import iter_pcap
+    from ..dissect import dissect_packet
+    from ..addon_loader import reset_flow_tracker, run_addons
+
+    engine = current_app.config["capture_engine"]
+    _pending_loads = current_app.config.get("_pending_loads", {})
+    load_info = _pending_loads.pop(load_id, None)
+
+    if not load_info:
+        return jsonify({"error": "Unknown or expired load_id"}), 404
+
+    tmp_path = load_info["tmp_path"]
+    filename = load_info["filename"]
 
     # Reset engine state
     engine.raw_packets.clear()
@@ -182,39 +202,55 @@ def load_pcap_route():
     engine._packet_counter = 0
     engine.stats.reset()
     engine.stream_tracker.reset()
-    from ..addon_loader import reset_flow_tracker, run_addons
     reset_flow_tracker()
 
-    # Process each packet through the dissection pipeline
-    packets = []
-    for pkt in raw_packets:
-        engine._packet_counter += 1
-        engine.raw_packets.append(pkt)
+    CHUNK_SIZE = 200
 
-        parsed = dissect_packet(pkt, engine._packet_counter)
-        if parsed:
-            # Use packet's actual timestamp if available
-            if hasattr(pkt, "time") and pkt.time:
-                parsed["timestamp"] = float(pkt.time)
-            engine.stats.update(parsed)
-            stream_id = engine.stream_tracker.process_packet(parsed)
-            if stream_id is not None:
-                parsed["stream_id"] = stream_id
+    def generate():
+        chunk = []
+        try:
+            for pkt in iter_pcap(tmp_path):
+                engine._packet_counter += 1
+                engine.raw_packets.append(pkt)
 
-        # Run addons so stateful addons accumulate cross-packet state
-        if engine.active_profile:
-            run_addons(pkt, engine.active_profile)
+                parsed = dissect_packet(pkt, engine._packet_counter)
+                if parsed:
+                    if hasattr(pkt, "time") and pkt.time:
+                        parsed["timestamp"] = float(pkt.time)
+                    engine.stats.update(parsed)
+                    stream_id = engine.stream_tracker.process_packet(parsed)
+                    if stream_id is not None:
+                        parsed["stream_id"] = stream_id
 
-        engine.packet_buffer.append(parsed)
-        if parsed:
-            packets.append(parsed)
+                if engine.active_profile:
+                    run_addons(pkt, engine.active_profile)
 
-    return jsonify({
-        "status": "loaded",
-        "packet_count": len(packets),
-        "filename": f.filename,
-        "packets": packets,
-    })
+                engine.packet_buffer.append(parsed)
+                if parsed:
+                    chunk.append(parsed)
+
+                if len(chunk) >= CHUNK_SIZE:
+                    yield f"data: {json.dumps({'type': 'packets', 'packets': chunk})}\n\n"
+                    chunk = []
+
+            # Flush remaining
+            if chunk:
+                yield f"data: {json.dumps({'type': 'packets', 'packets': chunk})}\n\n"
+
+            yield f"data: {json.dumps({'type': 'done', 'packet_count': engine._packet_counter, 'filename': filename})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @bp.route("/api/interfaces")
