@@ -21,3 +21,12 @@ def load_pcap(filepath):
     from scapy.all import rdpcap
 
     return rdpcap(str(filepath))
+
+
+def iter_pcap(filepath):
+    """Iterate packets from a .pcap file without loading all into memory."""
+    from scapy.all import PcapReader
+
+    with PcapReader(str(filepath)) as reader:
+        for pkt in reader:
+            yield pkt
