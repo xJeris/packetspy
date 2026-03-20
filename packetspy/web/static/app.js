@@ -173,7 +173,10 @@ function startTabPolling(tabName) {
     stopTabPolling(tabName);
     if (tabName === "by-process") {
         refreshProcessList();
-        tabIntervals[tabName] = setInterval(refreshProcessList, 2000);
+        tabIntervals[tabName] = setInterval(() => {
+            refreshProcessList();
+            if (selectedProcess) refreshSelectedProcessPackets();
+        }, 2000);
     } else if (tabName === "streams") {
         refreshStreams();
         tabIntervals[tabName] = setInterval(refreshStreams, 3000);
@@ -192,13 +195,18 @@ function stopTabPolling(tabName) {
 
 // === All Traffic (Tab 1) ===
 
+function isNearBottom(container) {
+    return container.scrollTop + container.clientHeight >= container.scrollHeight - 20;
+}
+
 function addPacketRow(pkt) {
+    const wasAtBottom = isNearBottom(tableContainer);
     const row = makePacketRow(pkt);
     tbody.appendChild(row);
     while (tbody.children.length > MAX_ROWS) {
         tbody.removeChild(tbody.firstChild);
     }
-    if (autoScrollCheck.checked) {
+    if (autoScrollCheck.checked && wasAtBottom) {
         tableContainer.scrollTop = tableContainer.scrollHeight;
     }
     count++;
@@ -268,15 +276,26 @@ async function selectProcess(name) {
     document.querySelectorAll(".process-item").forEach((el) => {
         el.classList.toggle("active", el.querySelector(".process-item-name").textContent === name);
     });
+    await refreshSelectedProcessPackets();
+}
 
+async function refreshSelectedProcessPackets() {
+    if (!selectedProcess) return;
     try {
-        const res = await fetch(`/api/packets/by_process?process=${encodeURIComponent(name)}`);
+        const res = await fetch(`/api/packets/by_process?process=${encodeURIComponent(selectedProcess)}`);
         const packets = await res.json();
         const ptbody = document.getElementById("process-packet-tbody");
+        const container = ptbody.closest(".table-container");
+        const wasAtBottom = container && isNearBottom(container);
+
         ptbody.innerHTML = "";
         packets.forEach((pkt) => {
             if (pkt) ptbody.appendChild(makePacketRowNoProc(pkt));
         });
+
+        if (container && autoScrollCheck.checked && wasAtBottom) {
+            container.scrollTop = container.scrollHeight;
+        }
     } catch (err) {
         console.error("Process packets error:", err);
     }
@@ -746,7 +765,7 @@ loadConfirm.addEventListener("click", async () => {
 
     // Show loading state — keep modal open, disable controls
     loadConfirm.disabled = true;
-    loadConfirm.textContent = "Loading...";
+    loadConfirm.textContent = "Uploading...";
     loadProfileSelect.disabled = true;
     loadProfileClose.style.display = "none";
 
@@ -755,6 +774,7 @@ loadConfirm.addEventListener("click", async () => {
     if (profileName) formData.append("profile", profileName);
 
     try {
+        // Step 1: Upload file and get a load_id
         const res = await fetch("/api/pcap/load", { method: "POST", body: formData });
         const data = await res.json();
         if (data.error) {
@@ -763,23 +783,55 @@ loadConfirm.addEventListener("click", async () => {
         }
 
         clearPackets();
-        data.packets.forEach(pkt => addPacketRow(pkt));
-        count = data.packet_count;
-        packetCount.textContent = `${count} packets`;
-        statusBadge.textContent = `Loaded: ${data.filename}`;
-        statusBadge.className = "badge badge-loaded";
+        loadConfirm.textContent = "Loading...";
+
+        // Step 2: Stream parsed packets via SSE
+        const loadSource = new EventSource(`/api/pcap/load/${data.load_id}/stream`);
+        loadSource.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "packets") {
+                const wasAtBottom = isNearBottom(tableContainer);
+                const frag = document.createDocumentFragment();
+                msg.packets.forEach(pkt => frag.appendChild(makePacketRow(pkt)));
+                tbody.appendChild(frag);
+                while (tbody.children.length > MAX_ROWS) {
+                    tbody.removeChild(tbody.firstChild);
+                }
+                count += msg.packets.length;
+                packetCount.textContent = `${count} packets`;
+                if (autoScrollCheck.checked && wasAtBottom) {
+                    tableContainer.scrollTop = tableContainer.scrollHeight;
+                }
+            } else if (msg.type === "done") {
+                loadSource.close();
+                statusBadge.textContent = `Loaded: ${msg.filename}`;
+                statusBadge.className = "badge badge-loaded";
+                resetLoadModal();
+            } else if (msg.type === "error") {
+                loadSource.close();
+                alert(`Load error: ${msg.error}`);
+                resetLoadModal();
+            }
+        };
+        loadSource.onerror = () => {
+            loadSource.close();
+            alert("PCAP load stream failed");
+            resetLoadModal();
+        };
     } catch (err) {
         console.error("Load error:", err);
         alert("Failed to load PCAP file");
-    } finally {
-        // Reset modal state
-        loadConfirm.disabled = false;
-        loadConfirm.textContent = "Load";
-        loadProfileSelect.disabled = false;
-        loadProfileClose.style.display = "";
-        loadProfileModal.style.display = "none";
+        resetLoadModal();
     }
 });
+
+function resetLoadModal() {
+    loadConfirm.disabled = false;
+    loadConfirm.textContent = "Load";
+    loadProfileSelect.disabled = false;
+    loadProfileClose.style.display = "";
+    loadProfileModal.style.display = "none";
+}
 
 loadProfileClose.addEventListener("click", () => {
     loadProfileModal.style.display = "none";
