@@ -79,7 +79,7 @@ Click any row in the packet table to open the packet detail view. Two view modes
 Both views show:
 
 - **Direction** — Client/Server (from profile ports) and Inbound/Outbound (from your IP)
-- **Layers** — Collapsible protocol headers (Ethernet, IP, TCP/UDP)
+- **Layers** — Collapsible protocol headers (Ethernet, IP, TCP/UDP). TCP layers include a flags description with human-readable names and context (e.g., "PSH ACK — Delivering data")
 - **Addon sections** — Protocol-specific parsing (e.g., EQ Session Protocol shows opcodes, sequence numbers)
 - **Payload** — Hex dump of the raw payload bytes
 
@@ -95,11 +95,11 @@ Both views show:
 
 ### Tabs
 
-**All Traffic** — Live packet stream. Each row shows: packet number, timestamp, source, destination, protocol, length, process name, and info summary.
+**All Traffic** — Live packet stream. Each row shows: packet number, timestamp, source, destination, protocol, length, process name, and info summary. TCP flags are shown in expanded form (e.g., `[PSH ACK]` instead of `[PA]`).
 
 **By Process** — Left sidebar lists processes sorted by traffic volume. Click a process to see only its packets.
 
-**TCP Streams** — Groups TCP packets into conversations. Shows source/destination, packet count, bytes, duration, and connection state (ACTIVE/FIN/RST). Click a stream to see its packets.
+**Streams** — Groups TCP and UDP packets into bidirectional conversations. Shows protocol, source/destination, packet count, bytes, duration, and connection state (ACTIVE/FIN/RST for TCP). Click a stream to see its packets, then click **Follow Stream** for a Wireshark-style conversation view with hex dump or plain text display and client/server direction coloring.
 
 **Dashboard** — Real-time statistics: total packets/bytes, throughput rate, protocol breakdown (bar chart), top processes, and top talkers (IPs by volume).
 

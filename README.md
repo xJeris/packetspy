@@ -14,7 +14,9 @@ A Windows packet sniffer that tracks network traffic by application. Create prof
 - **Profile system** — YAML configs that define which apps/ports/IPs to monitor
 - **BPF filtering** — kernel-level packet filtering, auto-generated from profiles
 - **Packet inspector** — click any packet to see full protocol layers, hex dump, and traffic direction (modal or side panel view)
-- **TCP stream tracking** — group packets into conversations
+- **TCP flag expansion** — human-readable flag names (SYN, ACK, PSH, etc.) with contextual descriptions (e.g., "Connection accepted (handshake step 2)")
+- **Stream tracking** — group TCP and UDP packets into bidirectional conversations
+- **Follow Stream** — Wireshark-style conversation view with hex dump or plain text, client/server direction coloring
 - **Real-time dashboard** — protocol breakdown, top processes, top talkers
 - **PCAP save/load** — save captures in Wireshark-compatible format and load them back for review
 - **Addon system** — pluggable protocol parsers with per-flow context and optional statefulness (e.g., EverQuest session protocol decoder with opcode labeling, CRC stripping, and decompression)
@@ -45,7 +47,7 @@ Then open http://127.0.0.1:5000
 |-----|-------------|
 | **All Traffic** | Live packet stream with SSE updates |
 | **By Process** | Sidebar of processes sorted by traffic, click to filter |
-| **TCP Streams** | TCP conversations grouped by 5-tuple |
+| **Streams** | TCP and UDP conversations grouped by 5-tuple, with Follow Stream view |
 | **Dashboard** | Protocol bars, top processes, top talkers |
 
 ## Packet Inspector
@@ -158,7 +160,7 @@ packetspy/
     profile_loader.py     # YAML profile parser
     profile_matcher.py    # Packet-to-profile matching
     stats.py              # Live traffic statistics
-    tcp_streams.py        # TCP conversation tracker
+    tcp_streams.py        # TCP and UDP stream tracker
     addon_loader.py       # Addon discovery and execution
     flow_context.py       # Per-flow context tracking for addons
     pcap_io.py            # PCAP save/load
