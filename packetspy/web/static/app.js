@@ -70,7 +70,7 @@ function makePacketRow(pkt) {
         `<td>${pkt.protocol}</td>` +
         `<td>${pkt.length}</td>` +
         `<td>${pkt.process || ""}</td>` +
-        `<td>${pkt.info}</td>`;
+        `<td>${escapeHtml(pkt.info)}</td>`;
     row.addEventListener("click", () => showPacketDetail(pkt.num));
     return row;
 }
@@ -88,7 +88,7 @@ function makePacketRowNoProc(pkt) {
         `<td>${dst}</td>` +
         `<td>${pkt.protocol}</td>` +
         `<td>${pkt.length}</td>` +
-        `<td>${pkt.info}</td>`;
+        `<td>${escapeHtml(pkt.info)}</td>`;
     row.addEventListener("click", () => showPacketDetail(pkt.num));
     return row;
 }
@@ -301,11 +301,23 @@ async function refreshSelectedProcessPackets() {
     }
 }
 
-// === TCP Streams (Tab 3) ===
+// === Streams (Tab 3) ===
 
 const streamListView = document.getElementById("stream-list-view");
 const streamDetailView = document.getElementById("stream-detail-view");
 const streamSort = document.getElementById("stream-sort");
+const btnFollowStream = document.getElementById("btn-follow-stream");
+const streamPacketsView = document.getElementById("stream-packets-view");
+const streamConversationView = document.getElementById("stream-conversation-view");
+const conversationBody = document.getElementById("conversation-body");
+const convModeHex = document.getElementById("conv-mode-hex");
+const convModeText = document.getElementById("conv-mode-text");
+const btnFollowBack = document.getElementById("btn-follow-back");
+const conversationLabel = document.getElementById("conversation-label");
+
+let currentStreamId = null;
+let convMode = "hex";
+let conversationData = null;
 
 streamSort.addEventListener("change", refreshStreams);
 
@@ -323,8 +335,10 @@ async function refreshStreams() {
         streams.forEach((s) => {
             const row = document.createElement("tr");
             const stateClass = `stream-state-${s.state.toLowerCase()}`;
+            const protoClass = `proto-${(s.protocol || "tcp").toLowerCase()}`;
             row.innerHTML =
                 `<td>${s.stream_id}</td>` +
+                `<td class="${protoClass}">${s.protocol || "TCP"}</td>` +
                 `<td>${s.src}</td>` +
                 `<td>${s.dst}</td>` +
                 `<td>${s.packet_count}</td>` +
@@ -341,13 +355,21 @@ async function refreshStreams() {
 }
 
 async function showStreamDetail(stream) {
+    currentStreamId = stream.stream_id;
+    conversationData = null;
+
     streamListView.style.display = "none";
     streamDetailView.style.display = "flex";
     streamDetailView.style.flexDirection = "column";
     streamDetailView.style.flex = "1";
 
+    // Reset to packets view
+    streamPacketsView.style.display = "";
+    streamConversationView.style.display = "none";
+    btnFollowStream.style.display = "";
+
     document.getElementById("stream-detail-title").textContent =
-        `Stream #${stream.stream_id}: ${stream.src} \u2194 ${stream.dst}`;
+        `${stream.protocol || "TCP"} Stream #${stream.stream_id}: ${stream.src} \u2194 ${stream.dst}`;
 
     try {
         const res = await fetch(`/api/streams/${stream.stream_id}/packets`);
@@ -363,11 +385,125 @@ async function showStreamDetail(stream) {
 }
 
 document.getElementById("stream-back").addEventListener("click", () => {
+    streamConversationView.style.display = "none";
+    streamPacketsView.style.display = "";
+    btnFollowStream.style.display = "";
+    conversationData = null;
+    currentStreamId = null;
+
     streamDetailView.style.display = "none";
     streamListView.style.display = "flex";
     streamListView.style.flexDirection = "column";
     streamListView.style.flex = "1";
 });
+
+// Follow Stream button
+btnFollowStream.addEventListener("click", async () => {
+    if (!currentStreamId) return;
+    try {
+        const res = await fetch(`/api/streams/${currentStreamId}/conversation`);
+        conversationData = await res.json();
+        streamPacketsView.style.display = "none";
+        streamConversationView.style.display = "flex";
+        btnFollowStream.style.display = "none";
+        renderConversation(conversationData, convMode);
+    } catch (err) {
+        console.error("Conversation error:", err);
+    }
+});
+
+// Show Packets button (back from conversation)
+btnFollowBack.addEventListener("click", () => {
+    streamConversationView.style.display = "none";
+    streamPacketsView.style.display = "";
+    btnFollowStream.style.display = "";
+    conversationData = null;
+});
+
+// Hex/Text mode toggles
+convModeHex.addEventListener("click", () => {
+    convMode = "hex";
+    convModeHex.classList.add("active");
+    convModeText.classList.remove("active");
+    if (conversationData) renderConversation(conversationData, convMode);
+});
+
+convModeText.addEventListener("click", () => {
+    convMode = "text";
+    convModeText.classList.add("active");
+    convModeHex.classList.remove("active");
+    if (conversationData) renderConversation(conversationData, convMode);
+});
+
+function renderConversation(packets, mode) {
+    conversationBody.innerHTML = "";
+
+    let clientLabel = "Client";
+    let serverLabel = "Server";
+    if (packets.length > 0) {
+        const first = packets.find(p => p.direction === "client") || packets[0];
+        clientLabel = `${first.src_ip}:${first.src_port}`;
+        serverLabel = `${first.dst_ip}:${first.dst_port}`;
+    }
+
+    conversationLabel.textContent = `${clientLabel} \u2194 ${serverLabel}`;
+
+    const dataPackets = packets.filter(p => p.has_payload);
+
+    if (dataPackets.length === 0) {
+        conversationBody.innerHTML =
+            '<div class="conv-empty">No payload data in this stream</div>';
+        return;
+    }
+
+    dataPackets.forEach(pkt => {
+        const block = document.createElement("div");
+        block.className = `conv-block conv-${pkt.direction}`;
+
+        const ts = pkt.timestamp
+            ? new Date(pkt.timestamp * 1000).toLocaleTimeString()
+            : "?";
+
+        const dirLabel = pkt.direction === "client"
+            ? `${clientLabel} \u2192 ${serverLabel}`
+            : `${serverLabel} \u2192 ${clientLabel}`;
+
+        let payloadContent;
+        if (mode === "hex") {
+            payloadContent = formatConvHexdump(pkt.payload_hex);
+        } else {
+            payloadContent = escapeHtml(pkt.payload_text);
+        }
+
+        block.innerHTML =
+            `<div class="conv-block-header">` +
+            `<span class="conv-dir-label">${escapeHtml(dirLabel)}</span>` +
+            `<span class="conv-ts">${ts}</span>` +
+            `<span class="conv-len">${pkt.payload_len} bytes</span>` +
+            `</div>` +
+            `<pre class="conv-payload">${payloadContent}</pre>`;
+
+        conversationBody.appendChild(block);
+    });
+}
+
+function formatConvHexdump(hexStr) {
+    const bytes = [];
+    for (let i = 0; i < hexStr.length; i += 2) {
+        bytes.push(parseInt(hexStr.substring(i, i + 2), 16));
+    }
+    const width = 16;
+    const lines = [];
+    for (let offset = 0; offset < bytes.length; offset += width) {
+        const chunk = bytes.slice(offset, offset + width);
+        const hexPart1 = chunk.slice(0, 8).map(b => b.toString(16).padStart(2, "0")).join(" ");
+        const hexPart2 = chunk.slice(8).map(b => b.toString(16).padStart(2, "0")).join(" ");
+        const hexPart = hexPart2.length > 0 ? `${hexPart1}  ${hexPart2}` : hexPart1;
+        const asciiPart = chunk.map(b => (b >= 32 && b < 127) ? String.fromCharCode(b) : ".").join("");
+        lines.push(`${offset.toString(16).padStart(4, "0")}   ${hexPart.padEnd(49)}  ${escapeHtml(asciiPart)}`);
+    }
+    return lines.join("\n");
+}
 
 // === Dashboard (Tab 4) ===
 
@@ -553,9 +689,10 @@ function renderPacketDetail(detail, prefix) {
         layer.fields.forEach((f) => {
             const fieldEl = document.createElement("div");
             fieldEl.className = "pkt-field";
+            fieldEl.dataset.field = f.name;
             fieldEl.innerHTML =
-                `<span class="pkt-field-name">${f.name}</span>` +
-                `<span class="pkt-field-value">${f.value}</span>`;
+                `<span class="pkt-field-name">${escapeHtml(String(f.name))}</span>` +
+                `<span class="pkt-field-value">${escapeHtml(String(f.value))}</span>`;
             fields.appendChild(fieldEl);
         });
 
