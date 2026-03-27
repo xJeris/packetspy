@@ -314,7 +314,7 @@ def get_stats():
 
 @bp.route("/api/streams")
 def get_streams():
-    """Return active TCP streams."""
+    """Return active TCP and UDP streams."""
     engine = current_app.config["capture_engine"]
     sort_by = request.args.get("sort", "last_seen")
     limit = int(request.args.get("limit", 100))
@@ -323,11 +323,82 @@ def get_streams():
 
 @bp.route("/api/streams/<int:stream_id>/packets")
 def get_stream_packets(stream_id):
-    """Return packets for a specific TCP stream."""
+    """Return packets for a specific stream."""
     engine = current_app.config["capture_engine"]
     packet_nums = set(engine.stream_tracker.get_stream_packets(stream_id))
     packets = [p for p in engine.packet_buffer if p and p.get("num") in packet_nums]
     return jsonify(packets)
+
+
+@bp.route("/api/streams/<int:stream_id>/conversation")
+def get_stream_conversation(stream_id):
+    """Return payload data for all packets in a stream, with direction."""
+    from scapy.layers.inet import IP, TCP, UDP
+
+    engine = current_app.config["capture_engine"]
+    packet_nums = engine.stream_tracker.get_stream_packets(stream_id)
+    if not packet_nums:
+        return jsonify([])
+
+    stream_src, stream_src_port = engine.stream_tracker.get_stream_direction_endpoint(stream_id)
+    stream_proto = engine.stream_tracker.get_stream_protocol(stream_id)
+
+    result = []
+    for num in packet_nums:
+        if num < 1 or num > len(engine.raw_packets):
+            continue
+        raw_pkt = engine.raw_packets[num - 1]
+
+        # Get the transport layer (TCP or UDP)
+        if stream_proto == "TCP" and raw_pkt.haslayer(TCP):
+            transport = raw_pkt[TCP]
+        elif stream_proto == "UDP" and raw_pkt.haslayer(UDP):
+            transport = raw_pkt[UDP]
+        else:
+            continue
+
+        ip_layer = raw_pkt[IP] if raw_pkt.haslayer(IP) else None
+
+        src_ip = ip_layer.src if ip_layer else None
+        dst_ip = ip_layer.dst if ip_layer else None
+        src_port = transport.sport
+        dst_port = transport.dport
+
+        is_client = (src_ip == stream_src and src_port == stream_src_port)
+
+        payload_bytes = bytes(transport.payload) if transport.payload else b""
+
+        payload_hex = payload_bytes.hex() if payload_bytes else ""
+        payload_text = "".join(
+            chr(b) if 32 <= b < 127 else "." for b in payload_bytes
+        ) if payload_bytes else ""
+
+        ts = float(raw_pkt.time) if hasattr(raw_pkt, "time") and raw_pkt.time else None
+        flags_raw = ""
+        if ts is None or stream_proto == "TCP":
+            for p in engine.packet_buffer:
+                if p and p.get("num") == num:
+                    if ts is None:
+                        ts = p.get("timestamp")
+                    flags_raw = p.get("flags_raw", "")
+                    break
+
+        result.append({
+            "num": num,
+            "timestamp": ts,
+            "src_ip": src_ip,
+            "src_port": src_port,
+            "dst_ip": dst_ip,
+            "dst_port": dst_port,
+            "direction": "client" if is_client else "server",
+            "flags_raw": flags_raw,
+            "payload_hex": payload_hex,
+            "payload_text": payload_text,
+            "payload_len": len(payload_bytes),
+            "has_payload": len(payload_bytes) > 0,
+        })
+
+    return jsonify(result)
 
 
 @bp.route("/api/packets/by_process")
