@@ -34,7 +34,7 @@
     <nav class="tab-bar">
         <button class="tab active" data-tab="all-traffic">All Traffic</button>
         <button class="tab" data-tab="by-process">By Process</button>
-        <button class="tab" data-tab="streams">TCP Streams</button>
+        <button class="tab" data-tab="streams">Streams</button>
         <button class="tab" data-tab="dashboard">Dashboard</button>
     </nav>
 
@@ -107,6 +107,7 @@
                     <thead>
                         <tr>
                             <th class="col-stream-id">#</th>
+                            <th class="col-stream-proto">Protocol</th>
                             <th class="col-stream-src">Source</th>
                             <th class="col-stream-dst">Destination</th>
                             <th class="col-stream-pkts">Packets</th>
@@ -125,8 +126,11 @@
             <div class="stream-detail-header">
                 <button id="stream-back" class="btn btn-clear">&larr; Back</button>
                 <span id="stream-detail-title"></span>
+                <div class="stream-view-toggle">
+                    <button id="btn-follow-stream" class="btn btn-save">Follow Stream</button>
+                </div>
             </div>
-            <div class="table-container">
+            <div id="stream-packets-view" class="table-container">
                 <table>
                     <thead>
                         <tr>
@@ -143,6 +147,17 @@
                     <tbody id="stream-detail-tbody">
                     </tbody>
                 </table>
+            </div>
+            <div id="stream-conversation-view" style="display:none;" class="conversation-container">
+                <div class="conversation-toolbar">
+                    <span id="conversation-label" class="conversation-info"></span>
+                    <div class="conversation-mode-toggle">
+                        <button id="conv-mode-hex" class="btn conv-mode-btn active">Hex</button>
+                        <button id="conv-mode-text" class="btn conv-mode-btn">Text</button>
+                    </div>
+                    <button id="btn-follow-back" class="btn btn-clear">Show Packets</button>
+                </div>
+                <div id="conversation-body" class="conversation-body"></div>
             </div>
         </div>
     </div>
