@@ -1,5 +1,41 @@
 import time
 
+# --- TCP flag expansion ---
+
+_FLAG_SHORT_TO_LONG = {
+    "S": "SYN",
+    "A": "ACK",
+    "F": "FIN",
+    "R": "RST",
+    "P": "PSH",
+    "U": "URG",
+    "E": "ECE",
+    "C": "CWR",
+}
+
+_FLAG_CONTEXT = {
+    frozenset(["SYN"]): "Connection request (handshake step 1)",
+    frozenset(["SYN", "ACK"]): "Connection accepted (handshake step 2)",
+    frozenset(["ACK"]): "Acknowledgement",
+    frozenset(["PSH", "ACK"]): "Delivering data",
+    frozenset(["FIN", "ACK"]): "Closing connection",
+    frozenset(["RST"]): "Connection forcibly reset",
+    frozenset(["RST", "ACK"]): "Connection forcibly reset",
+}
+
+
+def _expand_flags(scapy_flags):
+    """Convert Scapy FlagValue (e.g. 'PA') to expanded string (e.g. 'PSH ACK')."""
+    raw = str(scapy_flags)
+    expanded = [_FLAG_SHORT_TO_LONG.get(ch, ch) for ch in raw]
+    return " ".join(expanded)
+
+
+def _flag_context_description(expanded_flags_str):
+    """Return a human-readable description for a set of expanded flag names."""
+    flag_set = frozenset(expanded_flags_str.split())
+    return _FLAG_CONTEXT.get(flag_set, "")
+
 
 def dissect_packet(pkt, seq_num):
     """Parse a Scapy packet into a display-friendly dict."""
@@ -35,8 +71,10 @@ def dissect_packet(pkt, seq_num):
             result["protocol"] = "TCP"
             result["src_port"] = pkt[TCP].sport
             result["dst_port"] = pkt[TCP].dport
-            flags = str(pkt[TCP].flags)
-            result["info"] = f"TCP {pkt[TCP].sport} \u2192 {pkt[TCP].dport} [{flags}]"
+            raw_flags = str(pkt[TCP].flags)
+            expanded = _expand_flags(pkt[TCP].flags)
+            result["flags_raw"] = raw_flags
+            result["info"] = f"TCP {pkt[TCP].sport} \u2192 {pkt[TCP].dport} [{expanded}]"
         elif pkt.haslayer(UDP):
             result["protocol"] = "UDP"
             result["src_port"] = pkt[UDP].sport
@@ -100,6 +138,16 @@ def dissect_packet_detail(raw_pkt, parsed_pkt, profile=None, local_ip=None):
                 fields.append({"name": fd.name, "value": val})
             except Exception:
                 continue
+
+        # Add expanded flag description for TCP layer
+        if layer_name == "TCP":
+            try:
+                expanded = _expand_flags(layer.flags)
+                ctx = _flag_context_description(expanded)
+                desc = f"{expanded} \u2014 {ctx}" if ctx else expanded
+                fields.append({"name": "flags_description", "value": desc})
+            except Exception:
+                pass
 
         result["layers"].append({"name": layer_name, "fields": fields})
         layer = layer.payload if layer.payload and not isinstance(layer.payload, (bytes,)) and layer.payload is not None else None

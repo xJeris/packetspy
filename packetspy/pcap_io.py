@@ -16,13 +16,6 @@ def save_pcap(packets, filename=None):
     return filepath
 
 
-def load_pcap(filepath):
-    """Load packets from a .pcap file. Returns list of Scapy packets."""
-    from scapy.all import rdpcap
-
-    return rdpcap(str(filepath))
-
-
 def iter_pcap(filepath):
     """Iterate packets from a .pcap file without loading all into memory."""
     from scapy.all import PcapReader
