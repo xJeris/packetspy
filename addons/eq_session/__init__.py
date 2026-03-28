@@ -16,6 +16,7 @@ from .session_state import (
     frag_pop_complete, frag_save_result, frag_lookup_result,
 )
 from .crc import strip_crc
+from .decode import decode_payload
 from .decompress import decompress_payload
 from .opcodes import lookup as lookup_opcode
 
@@ -77,22 +78,32 @@ def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
     fields = [{"name": "Opcode", "value": f"{opcode_name} (0x{opcode_byte:02x})"}]
     notes = opcode_name
 
-    # Determine CRC byte count from flow context or legacy session state
+    # Determine CRC byte count and encode params from flow context or legacy state
     session = None
     if flow_ctx is not None:
         session = flow_ctx.store.get("eq_session")
     if session is None and state is not None:
         session = state.get(packet_info)
     crc_bytes = session["crc_bytes"] if session else 2
+    encode_key = session.get("encode_key", 0) if session else 0
+    encode_pass1 = session.get("encode_pass1", 0) if session else 0
+    encode_pass2 = session.get("encode_pass2", 0) if session else 0
 
-    # Strip CRC from data-carrying opcodes before further parsing
+    # Strip CRC from data-carrying opcodes, then XOR decode before further parsing
     data = payload_bytes
+    flags = []
     if opcode_byte in _DATA_OPCODES:
         data = strip_crc(payload_bytes, crc_bytes)
         if len(data) < len(payload_bytes):
             fields.append({"name": "CRC stripped", "value": f"{crc_bytes} bytes"})
+        # XOR decode (must happen after CRC strip, before decompression)
+        data, was_decoded = decode_payload(data, encode_key, encode_pass1, encode_pass2)
+        if was_decoded:
+            fields.append({"name": "XOR decoded", "value": f"key=0x{encode_key:08x}"})
+            flags.append("decrypted")
 
-    # Per-opcode parsing
+    # Per-opcode parsing — decoded_bytes collects processed app-layer payload
+    decoded_bytes = None
     if opcode_byte == 0x01:
         _parse_session_request(data, fields)
         notes = _notes_session_request(data)
@@ -103,9 +114,9 @@ def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
         count = _parse_combined(data, fields, flow_ctx)
         notes = f"OP_Combined ({count} sub-packets)"
     elif opcode_byte == 0x09:
-        notes = _parse_packet(data, fields)
+        notes, decoded_bytes = _parse_packet(data, fields)
     elif opcode_byte == 0x0d:
-        notes = _parse_fragment(data, fields, flow_ctx)
+        notes, decoded_bytes = _parse_fragment(data, fields, flow_ctx)
     elif opcode_byte == 0x15 or opcode_byte == 0x11:
         notes = _parse_ack(data, fields, opcode_name)
     elif opcode_byte == 0x19:
@@ -114,7 +125,15 @@ def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
     else:
         fields.append({"name": "Payload length", "value": f"{len(data) - 2} bytes"})
 
-    return {"fields": fields, "notes": notes}
+    result = {"fields": fields, "notes": notes}
+    if flags:
+        result["flags"] = flags
+    if decoded_bytes and len(decoded_bytes) > 0:
+        result["decoded_payload"] = decoded_bytes.hex()
+    # Include byte region map for raw hex annotation
+    if opcode_byte in _DATA_OPCODES:
+        result["byte_regions"] = _build_byte_regions(payload_bytes, crc_bytes, opcode_byte)
+    return result
 
 
 def _parse_session_request(payload, fields):
@@ -151,7 +170,12 @@ def _parse_session_response(payload, fields, packet_info, state, flow_ctx=None):
     fields.append({"name": "Max packet size", "value": str(max_pkt)})
 
     # Store session params for future packets in this flow
-    session_data = {"crc_bytes": crc_byte_count, "encode_key": encode_key}
+    session_data = {
+        "crc_bytes": crc_byte_count,
+        "encode_key": encode_key,
+        "encode_pass1": encode_pass1,
+        "encode_pass2": encode_pass2,
+    }
     if flow_ctx is not None:
         flow_ctx.store["eq_session"] = session_data
     if state:
@@ -202,9 +226,9 @@ def _parse_sub_packet(data, fields, index, flow_ctx=None):
         if opcode_name:
             sub_fields = []
             if opcode_byte == 0x09:
-                note = _parse_packet(data, sub_fields)
+                note, _ = _parse_packet(data, sub_fields)
             elif opcode_byte == 0x0d:
-                note = _parse_fragment(data, sub_fields, flow_ctx)
+                note, _ = _parse_fragment(data, sub_fields, flow_ctx)
             elif opcode_byte in (0x15, 0x11):
                 note = _parse_ack(data, sub_fields, opcode_name)
             else:
@@ -224,10 +248,13 @@ def _parse_sub_packet(data, fields, index, flow_ctx=None):
 
 
 def _parse_packet(payload, fields):
-    """Parse OP_Packet: sequence + decompress + app opcode labeling."""
+    """Parse OP_Packet: sequence + decompress + app opcode labeling.
+
+    Returns (notes_str, decoded_bytes_or_None).
+    """
     if len(payload) < 4:
         fields.append({"name": "Payload length", "value": f"{len(payload) - 2} bytes"})
-        return "OP_Packet"
+        return "OP_Packet", None
 
     seq = struct.unpack_from(">H", payload, 2)[0]
     fields.append({"name": "Sequence", "value": str(seq)})
@@ -236,7 +263,7 @@ def _parse_packet(payload, fields):
     app_data = payload[4:]
     if not app_data:
         fields.append({"name": "Payload length", "value": "0 bytes"})
-        return f"OP_Packet seq={seq}"
+        return f"OP_Packet seq={seq}", None
 
     # Decompress if needed
     decompressed, was_compressed = decompress_payload(app_data)
@@ -261,13 +288,16 @@ def _parse_packet(payload, fields):
 
     comp_note = ", compressed" if was_compressed else ""
     opcode_note = f" {app_opcode_str}" if app_opcode_str else ""
-    return f"OP_Packet seq={seq}{comp_note}{opcode_note}"
+    return f"OP_Packet seq={seq}{comp_note}{opcode_note}", decompressed
 
 
 def _parse_fragment(payload, fields, flow_ctx=None):
-    """Parse OP_Fragment with stateful reassembly via flow_ctx."""
+    """Parse OP_Fragment with stateful reassembly via flow_ctx.
+
+    Returns (notes_str, decoded_bytes_or_None).
+    """
     if len(payload) < 4:
-        return "OP_Fragment"
+        return "OP_Fragment", None
     seq = struct.unpack_from(">H", payload, 2)[0]
     fields.append({"name": "Sequence", "value": str(seq)})
 
@@ -277,7 +307,7 @@ def _parse_fragment(payload, fields, flow_ctx=None):
     if store is not None:
         cached = frag_lookup_result(store, seq)
         if cached:
-            return _show_cached_reassembly(cached, fields, seq)
+            return _show_cached_reassembly(cached, fields, seq), None
 
     # Detect first fragment: has 4-byte total_size field after sequence
     if len(payload) >= 8:
@@ -291,7 +321,7 @@ def _parse_fragment(payload, fields, flow_ctx=None):
             if store is not None:
                 frag_start(store, seq, possible_total, frag_data)
 
-            return f"OP_Fragment seq={seq} total={possible_total}B (first)"
+            return f"OP_Fragment seq={seq} total={possible_total}B (first)", None
 
     # Continuation fragment
     frag_data = payload[4:]  # skip [0x00, opcode, seq_hi, seq_lo]
@@ -312,16 +342,19 @@ def _parse_fragment(payload, fields, flow_ctx=None):
                     return _finish_reassembly(reassembled, fields, seq, buf_info, store)
 
             fields.append({"name": "Payload length", "value": f"{len(frag_data)} bytes"})
-            return f"OP_Fragment seq={seq} ({buf['chunk_count']}/{est_total_frags})"
+            return f"OP_Fragment seq={seq} ({buf['chunk_count']}/{est_total_frags})", None
 
     # No flow context or no active buffer — basic display
     fields.append({"name": "Fragment", "value": "Continuation"})
     fields.append({"name": "Payload length", "value": f"{len(frag_data)} bytes"})
-    return f"OP_Fragment seq={seq} (continuation)"
+    return f"OP_Fragment seq={seq} (continuation)", None
 
 
 def _finish_reassembly(reassembled, fields, seq, buf_info, store=None):
-    """Handle completed fragment reassembly: decompress + app opcode lookup."""
+    """Handle completed fragment reassembly: decompress + app opcode lookup.
+
+    Returns (notes_str, decoded_bytes).
+    """
     fields.append({
         "name": "Reassembled",
         "value": f"{buf_info['total_size']} bytes from {buf_info['chunk_count']} fragments",
@@ -353,7 +386,7 @@ def _finish_reassembly(reassembled, fields, seq, buf_info, store=None):
 
     comp_note = ", compressed" if was_compressed else ""
     opcode_note = f" \u2192 {app_opcode_str}" if app_opcode_str else ""
-    return f"OP_Fragment seq={seq} (complete{comp_note}{opcode_note})"
+    return f"OP_Fragment seq={seq} (complete{comp_note}{opcode_note})", decompressed
 
 
 def _show_cached_reassembly(cached, fields, seq):
@@ -411,3 +444,46 @@ def _read_app_opcode(data, fields):
             "value": f"0x{opcode_val:04x}",
         })
         return f"0x{opcode_val:04x}"
+
+
+def _build_byte_regions(raw_payload, crc_bytes, opcode_byte):
+    """Build a byte-region map for color-coding the raw hex dump.
+
+    Returns a list of {"start": int, "end": int, "type": str} dicts
+    describing contiguous byte regions in the raw UDP payload.
+    """
+    total = len(raw_payload)
+    regions = []
+
+    # Bytes 0-1: session opcode header (always present)
+    regions.append({"start": 0, "end": 2, "type": "header"})
+
+    if opcode_byte in (0x09, 0x0d):
+        # OP_Packet / OP_Fragment: bytes 2-3 = sequence
+        regions.append({"start": 2, "end": 4, "type": "sequence"})
+        if opcode_byte == 0x0d and total >= 8:
+            # OP_Fragment first: bytes 4-7 = total_size
+            possible_total = struct.unpack_from(">I", raw_payload, 4)[0]
+            if possible_total > total and possible_total < 1_000_000:
+                regions.append({"start": 4, "end": 8, "type": "frag-size"})
+                payload_start = 8
+            else:
+                payload_start = 4
+        else:
+            payload_start = 4
+        # Payload region (excluding trailing CRC)
+        payload_end = total - crc_bytes if crc_bytes and total > crc_bytes else total
+        if payload_start < payload_end:
+            regions.append({"start": payload_start, "end": payload_end, "type": "payload"})
+        # CRC region
+        if crc_bytes and payload_end < total:
+            regions.append({"start": payload_end, "end": total, "type": "crc"})
+    elif opcode_byte in (0x03, 0x19):
+        # OP_Combined / OP_AppCombined: all after header is sub-packets + CRC
+        payload_end = total - crc_bytes if crc_bytes and total > crc_bytes else total
+        if 2 < payload_end:
+            regions.append({"start": 2, "end": payload_end, "type": "payload"})
+        if crc_bytes and payload_end < total:
+            regions.append({"start": payload_end, "end": total, "type": "crc"})
+
+    return regions
