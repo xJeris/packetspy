@@ -615,6 +615,40 @@ function closeSidePanel() {
     selectedPktNum = null;
 }
 
+// Side panel resize drag
+(function() {
+    const resizeHandle = document.getElementById("side-panel-resize");
+    if (!resizeHandle) return;
+    let dragging = false;
+    let startX, startWidth;
+
+    resizeHandle.addEventListener("mousedown", (e) => {
+        dragging = true;
+        startX = e.clientX;
+        startWidth = sidePanel.offsetWidth;
+        resizeHandle.classList.add("dragging");
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+        e.preventDefault();
+    });
+
+    document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        // Dragging left edge: moving mouse left = panel gets wider
+        const delta = startX - e.clientX;
+        const newWidth = Math.max(280, Math.min(window.innerWidth * 0.8, startWidth + delta));
+        sidePanel.style.width = newWidth + "px";
+    });
+
+    document.addEventListener("mouseup", () => {
+        if (!dragging) return;
+        dragging = false;
+        resizeHandle.classList.remove("dragging");
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+    });
+})();
+
 function highlightPacketRow(pktNum) {
     clearPacketRowHighlight();
     selectedPktNum = pktNum;
@@ -708,16 +742,28 @@ function renderPacketDetail(detail, prefix) {
     });
 
     // Addon sections (protocol parsers)
+    let byteRegions = null;
     if (detail.addons) {
-        detail.addons.forEach(addon => renderAddonSection(layersDiv, addon));
+        detail.addons.forEach(addon => {
+            renderAddonSection(layersDiv, addon);
+            if (addon.data && addon.data.byte_regions) {
+                byteRegions = addon.data.byte_regions;
+            }
+        });
     }
 
     // Payload
     const payloadDiv = document.getElementById(`${prefix}-payload`);
     if (detail.payload && detail.payload.hexdump) {
-        payloadDiv.innerHTML =
-            `<div class="pkt-payload-title">Payload (${detail.payload.length} bytes)</div>` +
-            `<pre class="pkt-hexdump">${escapeHtml(detail.payload.hexdump)}</pre>`;
+        if (byteRegions) {
+            payloadDiv.innerHTML =
+                `<div class="pkt-payload-title">Payload (${detail.payload.length} bytes)</div>` +
+                `<pre class="pkt-hexdump">${formatAnnotatedHexdump(detail.payload.hexdump, byteRegions)}</pre>`;
+        } else {
+            payloadDiv.innerHTML =
+                `<div class="pkt-payload-title">Payload (${detail.payload.length} bytes)</div>` +
+                `<pre class="pkt-hexdump">${escapeHtml(detail.payload.hexdump)}</pre>`;
+        }
     } else {
         payloadDiv.innerHTML =
             `<div class="pkt-payload-title" style="color:#808080;">No payload</div>`;
@@ -751,7 +797,13 @@ function renderAddonSection(container, addon) {
 
     const header = document.createElement("div");
     header.className = "pkt-layer-header addon-header";
-    header.innerHTML = `<span class="pkt-layer-toggle">\u25BC</span> ${escapeHtml(addon.name)}`;
+    let headerHtml = `<span class="pkt-layer-toggle">\u25BC</span> ${escapeHtml(addon.name)}`;
+    if (addon.data.flags && addon.data.flags.length) {
+        addon.data.flags.forEach(flag => {
+            headerHtml += ` <span class="addon-flag addon-flag-${flag}">${escapeHtml(flag)}</span>`;
+        });
+    }
+    header.innerHTML = headerHtml;
 
     const fields = document.createElement("div");
     fields.className = "pkt-layer-fields";
@@ -776,6 +828,19 @@ function renderAddonSection(container, addon) {
         fields.appendChild(notesEl);
     }
 
+    // Decoded payload hex dump
+    if (addon.data.decoded_payload) {
+        const decodedTitle = document.createElement("div");
+        decodedTitle.className = "addon-decoded-title";
+        decodedTitle.textContent = "Decoded Payload";
+        fields.appendChild(decodedTitle);
+
+        const decodedPre = document.createElement("pre");
+        decodedPre.className = "pkt-hexdump addon-decoded-hex";
+        decodedPre.innerHTML = formatConvHexdump(addon.data.decoded_payload);
+        fields.appendChild(decodedPre);
+    }
+
     header.addEventListener("click", () => {
         const visible = fields.style.display !== "none";
         fields.style.display = visible ? "none" : "block";
@@ -791,6 +856,80 @@ function escapeHtml(str) {
     const div = document.createElement("div");
     div.textContent = str;
     return div.innerHTML;
+}
+
+function formatAnnotatedHexdump(hexdumpStr, regions) {
+    // Build a byte-index-to-region-type lookup
+    const byteType = {};
+    regions.forEach(r => {
+        for (let i = r.start; i < r.end; i++) byteType[i] = r.type;
+    });
+
+    const lines = hexdumpStr.split("\n");
+    const result = [];
+    for (const line of lines) {
+        // Parse: "0000   xx xx xx ...  ASCII"
+        // Find the offset (first 4 hex chars)
+        const match = line.match(/^([0-9a-f]{4})(   )(.*?)(  )(.*)$/);
+        if (!match) {
+            result.push(escapeHtml(line));
+            continue;
+        }
+        const offsetStr = match[1];
+        const offsetNum = parseInt(offsetStr, 16);
+        const sep1 = match[2];
+        const hexPart = match[3];
+        const sep2 = match[4];
+        const asciiPart = match[5];
+
+        // Split hex part into individual byte tokens, preserving spacing
+        // Format: "xx xx xx xx xx xx xx xx  xx xx xx xx xx xx xx xx"
+        let annotatedHex = "";
+        let annotatedAscii = "";
+        let byteIdx = offsetNum;
+        let i = 0;
+        let asciiIdx = 0;
+        while (i < hexPart.length) {
+            if (hexPart[i] === " ") {
+                annotatedHex += " ";
+                i++;
+                continue;
+            }
+            // Read 2-char hex byte
+            if (i + 1 < hexPart.length && /[0-9a-f]/i.test(hexPart[i]) && /[0-9a-f]/i.test(hexPart[i + 1])) {
+                const hexByte = hexPart.substring(i, i + 2);
+                const regionType = byteType[byteIdx] || "";
+                if (regionType) {
+                    annotatedHex += `<span class="hex-${regionType}">${hexByte}</span>`;
+                } else {
+                    annotatedHex += escapeHtml(hexByte);
+                }
+                // Corresponding ASCII char
+                if (asciiIdx < asciiPart.length) {
+                    const asciiChar = escapeHtml(asciiPart[asciiIdx]);
+                    if (regionType) {
+                        annotatedAscii += `<span class="hex-${regionType}">${asciiChar}</span>`;
+                    } else {
+                        annotatedAscii += asciiChar;
+                    }
+                    asciiIdx++;
+                }
+                byteIdx++;
+                i += 2;
+            } else {
+                annotatedHex += escapeHtml(hexPart[i]);
+                i++;
+            }
+        }
+        // Include remaining ASCII chars (shouldn't happen, but safety)
+        while (asciiIdx < asciiPart.length) {
+            annotatedAscii += escapeHtml(asciiPart[asciiIdx]);
+            asciiIdx++;
+        }
+
+        result.push(`${escapeHtml(offsetStr)}${sep1}${annotatedHex}${sep2}${annotatedAscii}`);
+    }
+    return result.join("\n");
 }
 
 // === Capture Controls ===

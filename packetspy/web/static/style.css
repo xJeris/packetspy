@@ -713,6 +713,57 @@ tr.proto-other, tr.proto-ip {
     font-style: italic;
 }
 
+.addon-flag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+
+.addon-flag-decrypted {
+    background: #2d4a5a;
+    color: #4fc1ff;
+}
+
+/* Decoded payload hex in addon section */
+.addon-decoded-title {
+    font-weight: 600;
+    color: #569cd6;
+    font-size: 12px;
+    padding: 6px 0 2px 0;
+    margin-top: 4px;
+}
+
+.addon-decoded-hex {
+    font-size: 11px !important;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+/* Hex dump byte region color coding */
+.hex-header {
+    color: #569cd6;
+}
+
+.hex-sequence {
+    color: #b5cea8;
+}
+
+.hex-payload {
+    color: #d4d4d4;
+}
+
+.hex-crc {
+    color: #808080;
+}
+
+.hex-frag-size {
+    color: #c586c0;
+}
+
 /* Make packet rows clickable */
 #packet-tbody tr,
 #process-packet-tbody tr,
@@ -738,12 +789,31 @@ tr.proto-other, tr.proto-ip {
 /* Side panel */
 .side-panel {
     width: 420px;
+    min-width: 280px;
+    max-width: 80vw;
     flex-shrink: 0;
     border-left: 1px solid #3c3c3c;
     background: #252526;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    position: relative;
+}
+
+.side-panel-resize {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    cursor: col-resize;
+    z-index: 10;
+    background: transparent;
+}
+
+.side-panel-resize:hover,
+.side-panel-resize.dragging {
+    background: #007acc;
 }
 
 .side-panel-header {
