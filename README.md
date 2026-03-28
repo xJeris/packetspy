@@ -55,7 +55,7 @@ Then open http://127.0.0.1:5000
 Click any packet row to view full details. Two view modes (configurable in Settings):
 
 - **Modal** — overlay popup, good for focused inspection
-- **Side panel** — persistent right panel that updates as you click rows, better for analysis workflows
+- **Side panel** — persistent right panel that updates as you click rows, better for analysis workflows. Drag the left edge to resize.
 
 ## Profiles
 
@@ -101,7 +101,7 @@ Protocol-specific parsers live in `addons/`. Addons can be a single `.py` file o
 
 **Included addon:**
 
-- `eq_session` — Parses the EverQuest (SOE) session protocol: session opcodes, sequence numbers, CRC stripping, zlib decompression, and application opcode labeling using ~350 RoF2 opcode mappings
+- `eq_session` — Parses the EverQuest (SOE) session protocol: session opcodes, sequence numbers, CRC stripping, XOR decode (encode pass 1/2), zlib decompression, fragment reassembly, and application opcode labeling using ~350 RoF2 opcode mappings. Includes decoded payload hex dump, color-coded byte regions in the raw hex dump, and a "DECRYPTED" badge when XOR decode is active.
 
 **Writing an addon:**
 
@@ -121,6 +121,11 @@ def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
 
     Return {"fields": [{"name": str, "value": str}, ...], "notes": str}
     or None to skip this packet.
+
+    Optional keys in the return dict:
+    - "flags": list of str — badge labels shown in the addon header (e.g., ["decrypted"])
+    - "decoded_payload": hex str — processed payload bytes, shown as a hex dump in the addon section
+    - "byte_regions": list of {"start": int, "end": int, "type": str} — color-codes byte ranges in the raw hex dump
     """
     if not payload_bytes:
         return None
@@ -178,6 +183,7 @@ packetspy/
       opcodes.py          # RoF2 opcode hex→name mapping
       session_state.py    # Per-flow session state tracker
       crc.py              # CRC byte stripping
+      decode.py           # XOR encode pass 1/2 decoder
       decompress.py       # Zlib raw deflate wrapper
   profiles/
     everquest.yaml        # EQ profile

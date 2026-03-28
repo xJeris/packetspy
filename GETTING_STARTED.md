@@ -74,14 +74,14 @@ Then open http://127.0.0.1:5000 in your browser.
 Click any row in the packet table to open the packet detail view. Two view modes are available (configurable in Settings):
 
 - **Modal (overlay)** — a popup dialog, good for focused inspection
-- **Side panel** — a persistent panel on the right that updates as you click rows, better for analysis workflows
+- **Side panel** — a persistent panel on the right that updates as you click rows, better for analysis workflows. The panel is resizable — drag the left edge to adjust width.
 
 Both views show:
 
 - **Direction** — Client/Server (from profile ports) and Inbound/Outbound (from your IP)
 - **Layers** — Collapsible protocol headers (Ethernet, IP, TCP/UDP). TCP layers include a flags description with human-readable names and context (e.g., "PSH ACK — Delivering data")
-- **Addon sections** — Protocol-specific parsing (e.g., EQ Session Protocol shows opcodes, sequence numbers)
-- **Payload** — Hex dump of the raw payload bytes
+- **Addon sections** — Protocol-specific parsing (e.g., EQ Session Protocol shows opcodes, sequence numbers). May include status badges (e.g., "DECRYPTED") and a decoded payload hex dump showing processed app-layer bytes
+- **Payload** — Hex dump of the raw payload bytes. When an addon provides byte region data, bytes are color-coded: blue for session headers, green for sequence numbers, purple for fragment sizes, gray for CRC
 
 ### Saving and loading captures
 
