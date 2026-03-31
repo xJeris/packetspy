@@ -183,6 +183,12 @@ function startTabPolling(tabName) {
     } else if (tabName === "dashboard") {
         refreshDashboard();
         tabIntervals[tabName] = setInterval(refreshDashboard, 2000);
+    } else if (tabName === "discovery") {
+        initDiscoveryTab();
+        if (discoveryActive) {
+            refreshDiscoveryOpcodes();
+            tabIntervals[tabName] = setInterval(refreshDiscoveryOpcodes, 2000);
+        }
     }
 }
 
@@ -1178,5 +1184,429 @@ async function init() {
         console.error("Init error:", err);
     }
 }
+
+// === Discovery Tab ===
+
+const discoveryAddonSelect = document.getElementById("discovery-addon-select");
+const discoveryOpcodeFile = document.getElementById("discovery-opcode-file");
+const btnDiscoveryStart = document.getElementById("btn-discovery-start");
+const btnDiscoveryStop = document.getElementById("btn-discovery-stop");
+const btnBaselineStart = document.getElementById("btn-baseline-start");
+const btnBaselineDiff = document.getElementById("btn-baseline-diff");
+const btnBaselineClear = document.getElementById("btn-baseline-clear");
+const btnSaveOpcodeFile = document.getElementById("btn-save-opcode-file");
+const discoveryStatus = document.getElementById("discovery-status");
+const discoveryOpcodeTbody = document.getElementById("discovery-opcode-tbody");
+const discoveryFieldPanel = document.getElementById("discovery-field-panel");
+const discoveryFieldTitle = document.getElementById("discovery-field-title");
+const discoveryFieldBody = document.getElementById("discovery-field-body");
+const discoveryFieldClose = document.getElementById("discovery-field-close");
+const discoveryDiffView = document.getElementById("discovery-diff-view");
+const discoveryHelpModal = document.getElementById("discovery-help-modal");
+const btnDiscoveryHelp = document.getElementById("btn-discovery-help");
+const discoveryHelpClose = document.getElementById("discovery-help-close");
+
+btnDiscoveryHelp.addEventListener("click", () => { discoveryHelpModal.style.display = "flex"; });
+discoveryHelpClose.addEventListener("click", () => { discoveryHelpModal.style.display = "none"; });
+discoveryHelpModal.addEventListener("click", (e) => { if (e.target === discoveryHelpModal) discoveryHelpModal.style.display = "none"; });
+const discoveryDiffTbody = document.getElementById("discovery-diff-tbody");
+const discoveryDiffClose = document.getElementById("discovery-diff-close");
+const discoveryMain = document.getElementById("discovery-main");
+
+let discoveryActive = false;
+let discoveryInitialized = false;
+let selectedDiscoveryOpcode = null;
+
+async function initDiscoveryTab() {
+    if (discoveryInitialized) return;
+    discoveryInitialized = true;
+
+    // Load available discovery addons
+    try {
+        const res = await fetch("/api/discovery/addons");
+        const addons = await res.json();
+        addons.forEach((a) => {
+            const opt = document.createElement("option");
+            opt.value = a.id;
+            opt.textContent = a.name;
+            discoveryAddonSelect.appendChild(opt);
+        });
+    } catch (err) {
+        console.error("Failed to load discovery addons:", err);
+    }
+
+    // When addon selection changes, refresh the opcode file dropdown
+    discoveryAddonSelect.addEventListener("change", () => {
+        loadOpcodeFiles(discoveryAddonSelect.value || "raw");
+    });
+
+    // When opcode file changes, set it as active on the backend
+    discoveryOpcodeFile.addEventListener("change", async () => {
+        const addonId = discoveryAddonSelect.value || "raw";
+        const fileId = discoveryOpcodeFile.value || null;
+        try {
+            await fetch(`/api/opcode-files/${addonId}/active`, {
+                method: "PUT",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({file_id: fileId}),
+            });
+        } catch (err) {
+            console.error("Failed to set active opcode file:", err);
+        }
+    });
+
+    // Check if a session is already running (before loading opcode files
+    // so we can restore the correct addon selection first)
+    try {
+        const res = await fetch("/api/discovery/status");
+        const status = await res.json();
+        if (status.active) {
+            discoveryActive = true;
+            if (status.addon_id) discoveryAddonSelect.value = status.addon_id;
+            setDiscoveryRunning(true);
+            refreshDiscoveryOpcodes();
+            tabIntervals["discovery"] = setInterval(refreshDiscoveryOpcodes, 2000);
+        }
+    } catch (err) {
+        // ignore
+    }
+
+    // Load opcode files for the current addon selection
+    await loadOpcodeFiles(discoveryAddonSelect.value || "raw");
+}
+
+async function loadOpcodeFiles(addonId) {
+    // Clear existing options
+    discoveryOpcodeFile.innerHTML = '<option value="">No Opcode File</option>';
+    try {
+        const res = await fetch(`/api/opcode-files/${addonId}`);
+        const files = await res.json();
+        files.forEach((f) => {
+            // Skip internal discovery labels file
+            if (f.id === "_discovery_labels") return;
+            const opt = document.createElement("option");
+            opt.value = f.id;
+            opt.textContent = `${f.name} (${f.count})`;
+            discoveryOpcodeFile.appendChild(opt);
+        });
+        // Select the currently active file
+        const activeRes = await fetch(`/api/opcode-files/${addonId}/active`);
+        const active = await activeRes.json();
+        if (active.file_id) {
+            discoveryOpcodeFile.value = active.file_id;
+        }
+    } catch (err) {
+        console.error("Failed to load opcode files:", err);
+    }
+}
+
+btnDiscoveryStart.addEventListener("click", async () => {
+    const addonId = discoveryAddonSelect.value || null;
+    try {
+        await fetch("/api/discovery/start", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({addon_id: addonId}),
+        });
+        discoveryActive = true;
+        setDiscoveryRunning(true);
+        refreshDiscoveryOpcodes();
+        tabIntervals["discovery"] = setInterval(refreshDiscoveryOpcodes, 2000);
+    } catch (err) {
+        console.error("Failed to start discovery:", err);
+    }
+});
+
+btnDiscoveryStop.addEventListener("click", async () => {
+    try {
+        await fetch("/api/discovery/stop", {method: "POST"});
+        discoveryActive = false;
+        setDiscoveryRunning(false);
+        stopTabPolling("discovery");
+    } catch (err) {
+        console.error("Failed to stop discovery:", err);
+    }
+});
+
+function setDiscoveryRunning(running) {
+    btnDiscoveryStart.disabled = running;
+    btnDiscoveryStop.disabled = !running;
+    discoveryAddonSelect.disabled = running;
+    discoveryOpcodeFile.disabled = running;
+    btnBaselineStart.disabled = !running;
+    btnBaselineDiff.disabled = !running;
+    btnBaselineClear.disabled = !running;
+    btnSaveOpcodeFile.disabled = !running;
+    discoveryStatus.textContent = running ? "Session active" : "";
+}
+
+btnSaveOpcodeFile.addEventListener("click", async () => {
+    const name = prompt("Save labels as opcode file.\nEnter a name (letters, numbers, underscores, hyphens):");
+    if (!name) return;
+    const addonId = discoveryAddonSelect.value || "raw";
+    try {
+        const res = await fetch(`/api/opcode-files/${addonId}/save`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name}),
+        });
+        const data = await res.json();
+        if (data.error) {
+            alert("Error: " + data.error);
+            return;
+        }
+        alert(`Saved ${data.count} opcodes as "${data.file_id}"`);
+        // Refresh the opcode file dropdown
+        await loadOpcodeFiles(addonId);
+    } catch (err) {
+        console.error("Failed to save opcode file:", err);
+    }
+});
+
+async function refreshDiscoveryOpcodes() {
+    try {
+        const res = await fetch("/api/discovery/opcodes");
+        const opcodes = await res.json();
+        renderDiscoveryOpcodes(opcodes);
+    } catch (err) {
+        // ignore polling errors
+    }
+}
+
+function renderDiscoveryOpcodes(opcodes) {
+    discoveryOpcodeTbody.innerHTML = "";
+    opcodes.forEach((op) => {
+        const tr = document.createElement("tr");
+        if (selectedDiscoveryOpcode === op.opcode) tr.classList.add("disc-selected");
+
+        const tdOp = document.createElement("td");
+        tdOp.textContent = op.opcode_hex;
+        if (op.known_name) tdOp.title = op.known_name;
+
+        const tdLabel = document.createElement("td");
+        const labelInput = document.createElement("input");
+        labelInput.className = "disc-label-input";
+        labelInput.value = op.label || "";
+        labelInput.placeholder = op.known_name || "";
+        labelInput.addEventListener("change", () => saveDiscoveryLabel(op.opcode, labelInput.value));
+        labelInput.addEventListener("click", (e) => e.stopPropagation());
+        tdLabel.appendChild(labelInput);
+
+        const tdCount = document.createElement("td");
+        tdCount.textContent = op.count;
+        tdCount.style.textAlign = "right";
+
+        const tdSize = document.createElement("td");
+        tdSize.textContent = op.size_fixed ? `${op.size}` : "var";
+        tdSize.style.textAlign = "right";
+
+        const tdRate = document.createElement("td");
+        tdRate.textContent = op.rate > 0 ? op.rate.toFixed(1) : "";
+        tdRate.style.textAlign = "right";
+
+        const tdTags = document.createElement("td");
+        (op.auto_tags || []).forEach((tag) => {
+            const span = document.createElement("span");
+            span.className = "disc-tag " + getTagClass(tag);
+            span.textContent = tag;
+            tdTags.appendChild(span);
+        });
+
+        tr.appendChild(tdOp);
+        tr.appendChild(tdLabel);
+        tr.appendChild(tdCount);
+        tr.appendChild(tdSize);
+        tr.appendChild(tdRate);
+        tr.appendChild(tdTags);
+
+        tr.addEventListener("click", () => showFieldAnalysis(op.opcode));
+        discoveryOpcodeTbody.appendChild(tr);
+    });
+}
+
+function getTagClass(tag) {
+    if (tag.startsWith("xyz-floats")) return "disc-tag-coords";
+    if (tag.startsWith("string")) return "disc-tag-string";
+    if (tag.startsWith("counter")) return "disc-tag-counter";
+    if (tag.startsWith("len-prefix")) return "disc-tag-lenprefix";
+    return "disc-tag-default";
+}
+
+async function showFieldAnalysis(opcode) {
+    selectedDiscoveryOpcode = opcode;
+    // Highlight selected row
+    discoveryOpcodeTbody.querySelectorAll("tr").forEach((tr, idx) => {
+        tr.classList.remove("disc-selected");
+    });
+    const rows = discoveryOpcodeTbody.querySelectorAll("tr");
+    rows.forEach((tr) => {
+        if (tr.cells[0] && tr.cells[0].textContent === `0x${opcode.toString(16).padStart(4, "0")}`) {
+            tr.classList.add("disc-selected");
+        }
+    });
+
+    discoveryFieldPanel.style.display = "flex";
+    discoveryFieldTitle.textContent = `Field Analysis: 0x${opcode.toString(16).padStart(4, "0")}`;
+    discoveryFieldBody.innerHTML = "<div style='color:#808080'>Analyzing...</div>";
+
+    try {
+        const res = await fetch(`/api/discovery/opcodes/${opcode}/fields`);
+        const data = await res.json();
+        renderFieldAnalysis(data);
+    } catch (err) {
+        discoveryFieldBody.innerHTML = `<div style="color:#f44">Error: ${err.message}</div>`;
+    }
+}
+
+function renderFieldAnalysis(data) {
+    let html = `<div style="margin-bottom:12px; color:#808080;">
+        ${data.total_count} packets, ${data.sample_count} samples, size: ${data.size}
+    </div>`;
+
+    if (!data.fields || data.fields.length === 0) {
+        html += '<div style="color:#808080;">Not enough samples for analysis</div>';
+        discoveryFieldBody.innerHTML = html;
+        return;
+    }
+
+    data.fields.forEach((f) => {
+        const typeClass = getFieldTypeClass(f.type);
+        const confClass = `disc-conf-${f.confidence}`;
+        const sizeStr = f.size === -1 ? "var" : f.size;
+
+        html += `<div class="disc-field-row">
+            <div class="disc-field-offset">@${f.offset} (${sizeStr}B)</div>
+            <div class="disc-field-type ${typeClass}">
+                ${escapeHtml(f.type)}
+                <span class="disc-field-confidence ${confClass}">${f.confidence}</span>
+            </div>
+            <div class="disc-field-values">
+                ${f.sample_values.map(v => escapeHtml(v)).join(", ")}
+                ${f.notes ? `<div class="disc-field-notes">${escapeHtml(f.notes)}</div>` : ""}
+            </div>
+        </div>`;
+    });
+
+    discoveryFieldBody.innerHTML = html;
+}
+
+function getFieldTypeClass(type) {
+    if (type === "fixed") return "disc-field-type-fixed";
+    if (type.includes("float")) return "disc-field-type-float";
+    if (type.includes("uint") || type.includes("counter")) return "disc-field-type-int";
+    if (type.includes("string")) return "disc-field-type-string";
+    return "disc-field-type-unknown";
+}
+
+function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+discoveryFieldClose.addEventListener("click", () => {
+    discoveryFieldPanel.style.display = "none";
+    selectedDiscoveryOpcode = null;
+    discoveryOpcodeTbody.querySelectorAll("tr.disc-selected").forEach((tr) => {
+        tr.classList.remove("disc-selected");
+    });
+});
+
+async function saveDiscoveryLabel(opcode, label) {
+    try {
+        await fetch(`/api/discovery/opcodes/${opcode}/label`, {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({label}),
+        });
+    } catch (err) {
+        console.error("Failed to save label:", err);
+    }
+}
+
+// Baseline controls
+btnBaselineStart.addEventListener("click", async () => {
+    try {
+        await fetch("/api/discovery/baseline/start", {method: "POST"});
+        discoveryStatus.textContent = "Session active (baseline recording)";
+    } catch (err) {
+        console.error("Failed to start baseline:", err);
+    }
+});
+
+btnBaselineDiff.addEventListener("click", async () => {
+    try {
+        const res = await fetch("/api/discovery/baseline/diff");
+        const diffs = await res.json();
+        showBaselineDiff(diffs);
+    } catch (err) {
+        console.error("Failed to get diff:", err);
+    }
+});
+
+btnBaselineClear.addEventListener("click", async () => {
+    try {
+        await fetch("/api/discovery/baseline/clear", {method: "POST"});
+        discoveryStatus.textContent = "Session active";
+        discoveryDiffView.style.display = "none";
+        discoveryMain.style.display = "flex";
+    } catch (err) {
+        console.error("Failed to clear baseline:", err);
+    }
+});
+
+function showBaselineDiff(diffs) {
+    discoveryMain.style.display = "none";
+    discoveryDiffView.style.display = "block";
+    discoveryDiffTbody.innerHTML = "";
+
+    if (diffs.length === 0) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 5;
+        td.textContent = "No new or changed opcodes since baseline";
+        td.style.color = "#808080";
+        td.style.textAlign = "center";
+        td.style.padding = "20px";
+        tr.appendChild(td);
+        discoveryDiffTbody.appendChild(tr);
+        return;
+    }
+
+    diffs.forEach((d) => {
+        const tr = document.createElement("tr");
+        tr.className = d.is_new ? "disc-diff-new" : "disc-diff-spike";
+
+        const tdOp = document.createElement("td");
+        tdOp.textContent = d.opcode_hex;
+
+        const tdLabel = document.createElement("td");
+        tdLabel.textContent = d.label || "";
+
+        const tdDelta = document.createElement("td");
+        tdDelta.textContent = `+${d.delta}`;
+        tdDelta.style.textAlign = "right";
+        tdDelta.style.fontWeight = "600";
+
+        const tdRate = document.createElement("td");
+        tdRate.textContent = d.rate > 0 ? d.rate.toFixed(1) : "";
+        tdRate.style.textAlign = "right";
+
+        const tdNotes = document.createElement("td");
+        tdNotes.textContent = d.is_new ? "NEW — not in baseline" : `was ${d.baseline_count}, now ${d.current_count}`;
+
+        tr.appendChild(tdOp);
+        tr.appendChild(tdLabel);
+        tr.appendChild(tdDelta);
+        tr.appendChild(tdRate);
+        tr.appendChild(tdNotes);
+        discoveryDiffTbody.appendChild(tr);
+    });
+}
+
+discoveryDiffClose.addEventListener("click", () => {
+    discoveryDiffView.style.display = "none";
+    discoveryMain.style.display = "flex";
+});
 
 init();
