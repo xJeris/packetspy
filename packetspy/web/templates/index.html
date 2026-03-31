@@ -36,6 +36,7 @@
         <button class="tab" data-tab="by-process">By Process</button>
         <button class="tab" data-tab="streams">Streams</button>
         <button class="tab" data-tab="dashboard">Dashboard</button>
+        <button class="tab" data-tab="discovery">Discovery</button>
     </nav>
 
     <div class="main-content">
@@ -189,6 +190,75 @@
         </div>
     </div>
 
+    <!-- Tab 5: Discovery -->
+    <div id="tab-discovery" class="tab-content">
+        <div class="discovery-toolbar">
+            <select id="discovery-addon-select">
+                <option value="">No Addon (raw payloads)</option>
+            </select>
+            <select id="discovery-opcode-file" title="Opcode file for labeling known opcodes">
+                <option value="">No Opcode File</option>
+            </select>
+            <button id="btn-discovery-start" class="btn btn-start">Start Session</button>
+            <button id="btn-discovery-stop" class="btn btn-stop" disabled>Stop Session</button>
+            <div class="discovery-toolbar-sep"></div>
+            <button id="btn-baseline-start" class="btn btn-save" disabled>Start Baseline</button>
+            <button id="btn-baseline-diff" class="btn btn-save" disabled>Show Diff</button>
+            <button id="btn-baseline-clear" class="btn btn-clear" disabled>Clear Baseline</button>
+            <button id="btn-save-opcode-file" class="btn btn-save" disabled title="Save labels as an opcode file">Save Opcodes</button>
+            <span id="discovery-status" class="discovery-status-text"></span>
+            <button id="btn-discovery-help" class="btn btn-settings" title="How to use Discovery">&#x2139;</button>
+        </div>
+        <div id="discovery-main" class="discovery-main">
+            <div id="discovery-opcode-view" class="discovery-opcode-view">
+                <div class="table-container">
+                    <table id="discovery-opcode-table">
+                        <thead>
+                            <tr>
+                                <th class="col-disc-op">Opcode</th>
+                                <th class="col-disc-label">Label</th>
+                                <th class="col-disc-count">Count</th>
+                                <th class="col-disc-size">Size</th>
+                                <th class="col-disc-rate">Rate/s</th>
+                                <th class="col-disc-tags">Auto-Tags</th>
+                            </tr>
+                        </thead>
+                        <tbody id="discovery-opcode-tbody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div id="discovery-field-panel" class="discovery-field-panel" style="display:none;">
+                <div class="discovery-field-header">
+                    <span id="discovery-field-title">Field Analysis</span>
+                    <button id="discovery-field-close" class="modal-close">&times;</button>
+                </div>
+                <div id="discovery-field-body" class="discovery-field-body"></div>
+            </div>
+        </div>
+        <div id="discovery-diff-view" class="discovery-diff-view" style="display:none;">
+            <div class="discovery-diff-header">
+                <span>Baseline Diff</span>
+                <button id="discovery-diff-close" class="modal-close">&times;</button>
+            </div>
+            <div class="table-container">
+                <table id="discovery-diff-table">
+                    <thead>
+                        <tr>
+                            <th class="col-disc-op">Opcode</th>
+                            <th class="col-disc-label">Label</th>
+                            <th class="col-disc-delta">Delta</th>
+                            <th class="col-disc-rate">Rate/s</th>
+                            <th class="col-disc-notes">Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody id="discovery-diff-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
     </div><!-- /.tab-area -->
 
     <div id="side-panel" class="side-panel" style="display:none;">
@@ -267,6 +337,66 @@
                 <div style="text-align:right; margin-top:12px;">
                     <button id="load-confirm" class="btn btn-start">Load</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="discovery-help-modal" class="modal-overlay" style="display:none;">
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <span>Discovery Tab Guide</span>
+                <button id="discovery-help-close" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body discovery-help-body">
+                <h3>Overview</h3>
+                <p>The Discovery tab helps you reverse-engineer unknown network protocols by grouping packets by their 2-byte opcode, analyzing payload structure, and detecting field types automatically.</p>
+
+                <h3>Quick Start</h3>
+                <ol>
+                    <li><strong>Choose an addon</strong> (or "No Addon" for raw payloads) from the first dropdown.</li>
+                    <li>Optionally select an <strong>Opcode File</strong> from the second dropdown to pre-label known opcodes.</li>
+                    <li>Click <strong>Start Session</strong> to begin collecting packets.</li>
+                    <li><strong>Start a capture</strong> (or load a PCAP) from the header controls &mdash; Discovery runs alongside normal capture.</li>
+                    <li>The opcode table fills in as packets arrive. Each row shows an opcode, how many times it appeared, payload size, rate, and any auto-detected tags.</li>
+                </ol>
+
+                <h3>Addon vs Raw Mode</h3>
+                <p><strong>Addon mode</strong> (e.g. "EQ Session Protocol") decodes packets through the addon's pipeline first (CRC strip, XOR decode, decompress, defragment), then groups by the application-layer opcode. Use this when the transport layer is already handled by an addon.</p>
+                <p><strong>Raw mode</strong> ("No Addon") groups packets by the first 2 bytes of the raw TCP/UDP payload. Use this for unknown protocols with no addon.</p>
+
+                <h3>Opcode Table</h3>
+                <ul>
+                    <li><strong>Label</strong> &mdash; Click the label field on any row to name an opcode (e.g. "PlayerPosition"). Labels are saved automatically.</li>
+                    <li><strong>Size</strong> &mdash; Shows the payload size if fixed, or "var" if variable-length.</li>
+                    <li><strong>Auto-Tags</strong> &mdash; Heuristic badges like <em>xyz-floats</em>, <em>string</em>, <em>counter</em>, or <em>len-prefix</em> hint at what's inside.</li>
+                    <li><strong>Click a row</strong> to open <strong>Field Analysis</strong> &mdash; a byte-level structural breakdown of the payload with type guesses (float, uint16, string, etc.).</li>
+                </ul>
+
+                <h3>Baseline Diffing</h3>
+                <p>Baseline diffing helps you figure out which opcodes correspond to a specific action:</p>
+                <ol>
+                    <li>With a session running, click <strong>Start Baseline</strong> to snapshot current opcode counts.</li>
+                    <li>Perform an in-game action (e.g. open inventory, cast a spell, move your character).</li>
+                    <li>Click <strong>Show Diff</strong> to see which opcodes spiked or appeared since the baseline.</li>
+                    <li>Use <strong>Clear Baseline</strong> to reset and try another action.</li>
+                </ol>
+
+                <h3>Opcode Files</h3>
+                <p>Opcode files are JSON mappings of opcode values to human-readable names. They feed both Discovery and the packet inspector across all tabs.</p>
+                <ul>
+                    <li><strong>Select an opcode file</strong> from the dropdown to pre-label known opcodes. Opcodes with a known name show as placeholder text in the Label column.</li>
+                    <li><strong>Save your work</strong> &mdash; after labeling opcodes, click <strong>Save Opcodes</strong> to create a new opcode file you can reuse in future sessions.</li>
+                    <li><strong>Switching files</strong> updates opcode labels everywhere &mdash; packet detail views, Discovery, and stream follow views.</li>
+                    <li>Opcode files live in <code>opcode_files/&lt;addon_id&gt;/</code> as JSON. You can also edit them by hand.</li>
+                </ul>
+
+                <h3>Tips</h3>
+                <ul>
+                    <li>You can start/stop Discovery sessions independently of the packet capture.</li>
+                    <li>Loading a PCAP with a Discovery session active will feed those packets into discovery too.</li>
+                    <li>The EQ addon requires seeing <em>OP_SessionResponse</em> to learn CRC/encryption params &mdash; make sure your capture or PCAP includes connection setup.</li>
+                    <li>If using addon mode without a profile selected, Discovery will run the addon's parser internally to build session state.</li>
+                </ul>
             </div>
         </div>
     </div>
