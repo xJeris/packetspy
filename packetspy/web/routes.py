@@ -184,7 +184,7 @@ def stream_pcap_load(load_id):
     """SSE endpoint that streams parsed packets from a pending PCAP load."""
     from ..pcap_io import iter_pcap
     from ..dissect import dissect_packet
-    from ..addon_loader import reset_flow_tracker, run_addons
+    from ..addon_loader import reset_flow_tracker, run_addons, feed_discovery
 
     engine = current_app.config["capture_engine"]
     _pending_loads = current_app.config.get("_pending_loads", {})
@@ -224,6 +224,9 @@ def stream_pcap_load(load_id):
 
                 if engine.active_profile:
                     run_addons(pkt, engine.active_profile)
+
+                # Feed discovery session (works with or without profile)
+                feed_discovery(pkt, engine.active_profile)
 
                 engine.packet_buffer.append(parsed)
                 if parsed:
@@ -497,6 +500,307 @@ def put_settings():
             settings[key] = data[key]
     _save_settings(settings)
     return jsonify(settings)
+
+
+# ---------------------------------------------------------------------------
+# Opcode files API
+# ---------------------------------------------------------------------------
+
+
+def _safe_name(name):
+    """Sanitize a name for use as a filename component (no path traversal)."""
+    return "".join(c for c in name if c.isalnum() or c in "_-")
+
+
+def _opcode_files_dir(addon_id):
+    """Return the directory for opcode files of a given addon (or 'raw')."""
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    name = _safe_name(addon_id) if addon_id else "raw"
+    if not name:
+        name = "raw"
+    d = os.path.join(project_root, "opcode_files", name)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@bp.route("/api/opcode-files/<addon_id>")
+def opcode_files_list(addon_id):
+    """List available opcode files for an addon."""
+    d = _opcode_files_dir(addon_id)
+    result = []
+    for entry in sorted(os.listdir(d)):
+        if entry.endswith(".json"):
+            file_id = entry[:-5]
+            path = os.path.join(d, entry)
+            try:
+                with open(path, "r") as f:
+                    data = json.load(f)
+                count = len(data)
+            except (json.JSONDecodeError, OSError):
+                count = 0
+            result.append({"id": file_id, "name": file_id, "count": count})
+    return jsonify(result)
+
+
+@bp.route("/api/opcode-files/<addon_id>/active")
+def opcode_files_get_active(addon_id):
+    """Get the currently active opcode file for an addon."""
+    if addon_id == "eq_session":
+        try:
+            from addons.eq_session.opcodes import get_active_file_id
+            return jsonify({"file_id": get_active_file_id()})
+        except ImportError:
+            pass
+    return jsonify({"file_id": None})
+
+
+@bp.route("/api/opcode-files/<addon_id>/active", methods=["PUT"])
+def opcode_files_set_active(addon_id):
+    """Set the active opcode file for an addon."""
+    data = request.get_json(silent=True) or {}
+    file_id = data.get("file_id")
+
+    if not file_id:
+        # Clear active opcodes
+        if addon_id == "eq_session":
+            try:
+                from addons.eq_session.opcodes import set_active_opcodes_dict
+                set_active_opcodes_dict({}, None)
+            except ImportError:
+                pass
+        return jsonify({"status": "cleared"})
+
+    # Sanitize and validate the file exists
+    file_id = _safe_name(file_id)
+    if not file_id:
+        return jsonify({"error": "Invalid file ID"}), 400
+    d = _opcode_files_dir(addon_id)
+    path = os.path.join(d, f"{file_id}.json")
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    if addon_id == "eq_session":
+        try:
+            from addons.eq_session.opcodes import set_active_opcodes
+            set_active_opcodes(file_id)
+        except ImportError:
+            pass
+
+    return jsonify({"status": "ok", "file_id": file_id})
+
+
+@bp.route("/api/opcode-files/<addon_id>/save", methods=["POST"])
+def opcode_files_save(addon_id):
+    """Save opcodes as a new opcode file.
+
+    Body: {"name": "MyClient", "opcodes": {"0x1234": "OP_Name", ...}}
+    If opcodes is omitted, saves the current discovery session labels.
+    """
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+
+    safe_name = _safe_name(name)
+    if not safe_name:
+        return jsonify({"error": "Invalid name"}), 400
+
+    opcodes = data.get("opcodes")
+    if opcodes is None and _discovery_session is not None:
+        # Use current discovery session labels
+        opcodes = {f"0x{k:04x}": v for k, v in _discovery_session.labels.items()}
+
+    if not opcodes:
+        return jsonify({"error": "No opcodes to save"}), 400
+
+    d = _opcode_files_dir(addon_id)
+    path = os.path.join(d, f"{safe_name}.json")
+    with open(path, "w") as f:
+        json.dump(opcodes, f, indent=2, sort_keys=True)
+
+    return jsonify({"status": "ok", "file_id": safe_name, "count": len(opcodes)})
+
+
+# ---------------------------------------------------------------------------
+# Discovery tab API
+# ---------------------------------------------------------------------------
+
+# Module-level discovery session (one at a time)
+_discovery_session = None
+
+
+@bp.route("/api/discovery/addons")
+def discovery_addons():
+    """List addons that support the Discovery tab."""
+    from ..addon_loader import get_discovery_addons
+    return jsonify(get_discovery_addons())
+
+
+@bp.route("/api/discovery/start", methods=["POST"])
+def discovery_start():
+    """Start a discovery session with an optional addon."""
+    global _discovery_session
+    from ..discovery import DiscoverySession, load_labels
+
+    data = request.get_json(silent=True) or {}
+    addon_id = data.get("addon_id")  # None = raw mode
+
+    _discovery_session = DiscoverySession(addon_id=addon_id)
+
+    # Load persisted labels if they exist
+    labels_path = _discovery_labels_path(addon_id)
+    if labels_path:
+        _discovery_session.labels = load_labels(labels_path)
+
+    return jsonify({"status": "started", "addon_id": addon_id})
+
+
+@bp.route("/api/discovery/stop", methods=["POST"])
+def discovery_stop():
+    """Stop the current discovery session."""
+    global _discovery_session
+    from ..discovery import save_labels
+
+    if _discovery_session is not None:
+        # Persist labels before clearing
+        labels_path = _discovery_labels_path(_discovery_session.addon_id)
+        if labels_path and _discovery_session.labels:
+            save_labels(_discovery_session.labels, labels_path)
+        _discovery_session.active = False
+        _discovery_session = None
+    return jsonify({"status": "stopped"})
+
+
+@bp.route("/api/discovery/status")
+def discovery_status():
+    """Return current discovery session state."""
+    if _discovery_session is None:
+        return jsonify({"active": False})
+    return jsonify({
+        "active": _discovery_session.active,
+        "addon_id": _discovery_session.addon_id,
+        "opcode_count": len(_discovery_session.opcode_groups),
+        "has_baseline": _discovery_session.baseline is not None,
+    })
+
+
+@bp.route("/api/discovery/opcodes")
+def discovery_opcodes():
+    """Return all opcode groups with counts, sizes, and auto-tags."""
+    if _discovery_session is None:
+        return jsonify([])
+
+    # Build known_opcodes from the active opcode file + discovery hooks
+    known_opcodes = {}
+    if _discovery_session.addon_id:
+        # Get app-layer opcodes from the active opcode file (eq_session only for now)
+        if _discovery_session.addon_id == "eq_session":
+            try:
+                from addons.eq_session.opcodes import get_active_opcodes
+                known_opcodes.update(get_active_opcodes())
+            except ImportError:
+                pass
+        # Overlay session-layer opcodes from discovery hooks
+        from ..addon_loader import get_addon_discovery_hooks
+        hooks = get_addon_discovery_hooks(_discovery_session.addon_id)
+        if hooks and hooks.get("known_opcodes"):
+            known_opcodes.update(hooks["known_opcodes"])
+
+    return jsonify(_discovery_session.get_opcodes(known_opcodes=known_opcodes or None))
+
+
+@bp.route("/api/discovery/opcodes/<int:opcode>/fields")
+def discovery_opcode_fields(opcode):
+    """Run field analysis on a specific opcode group."""
+    from ..discovery import analyze_fields
+
+    if _discovery_session is None:
+        return jsonify({"error": "No active session"}), 400
+
+    group = _discovery_session.get_group(opcode)
+    if group is None:
+        return jsonify({"error": "Opcode not found"}), 404
+
+    fields = analyze_fields(group)
+    return jsonify({
+        "opcode": opcode,
+        "opcode_hex": f"0x{opcode:04x}",
+        "sample_count": len(group.samples),
+        "total_count": group.count,
+        "size": group.size_display,
+        "label": _discovery_session.labels.get(opcode, ""),
+        "fields": fields,
+    })
+
+
+@bp.route("/api/discovery/opcodes/<int:opcode>/label", methods=["PUT"])
+def discovery_set_label(opcode):
+    """Set a user label for an opcode."""
+    from ..discovery import save_labels
+
+    if _discovery_session is None:
+        return jsonify({"error": "No active session"}), 400
+
+    data = request.get_json(silent=True) or {}
+    label = data.get("label", "").strip()
+    _discovery_session.set_label(opcode, label)
+
+    # Auto-save labels
+    labels_path = _discovery_labels_path(_discovery_session.addon_id)
+    if labels_path:
+        save_labels(_discovery_session.labels, labels_path)
+
+    return jsonify({"status": "ok", "opcode": opcode, "label": label})
+
+
+@bp.route("/api/discovery/baseline/start", methods=["POST"])
+def discovery_baseline_start():
+    """Snapshot current opcode counts as baseline."""
+    if _discovery_session is None:
+        return jsonify({"error": "No active session"}), 400
+    _discovery_session.start_baseline()
+    return jsonify({"status": "baseline_started"})
+
+
+@bp.route("/api/discovery/baseline/diff")
+def discovery_baseline_diff():
+    """Return diff between current state and baseline."""
+    if _discovery_session is None:
+        return jsonify({"error": "No active session"}), 400
+    return jsonify(_discovery_session.compute_diff())
+
+
+@bp.route("/api/discovery/baseline/clear", methods=["POST"])
+def discovery_baseline_clear():
+    """Clear the baseline."""
+    if _discovery_session is None:
+        return jsonify({"error": "No active session"}), 400
+    _discovery_session.clear_baseline()
+    return jsonify({"status": "baseline_cleared"})
+
+
+@bp.route("/api/discovery/labels")
+def discovery_labels():
+    """Return all saved labels for the current session."""
+    if _discovery_session is None:
+        return jsonify({})
+    return jsonify({f"0x{k:04x}": v for k, v in _discovery_session.labels.items()})
+
+
+def _discovery_labels_path(addon_id):
+    """Return the file path for persisting discovery labels.
+
+    Labels are stored in the unified opcode_files/ folder as
+    _discovery_labels.json under the addon's subfolder.
+    """
+    d = _opcode_files_dir(addon_id)
+    return os.path.join(d, "_discovery_labels.json")
+
+
+def get_discovery_session():
+    """Return the active discovery session (used by addon_loader)."""
+    return _discovery_session
 
 
 @bp.route("/api/shutdown", methods=["POST"])
