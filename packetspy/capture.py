@@ -112,6 +112,10 @@ class CaptureEngine:
             from .addon_loader import run_addons
             run_addons(pkt, self.active_profile)
 
+        # Feed discovery session (works with or without profile)
+        from .addon_loader import feed_discovery
+        feed_discovery(pkt, self.active_profile)
+
         self.packet_buffer.append(parsed)
 
         for q in list(self._sse_subscribers):

@@ -109,11 +109,22 @@ def _register_addon(addon_id, mod):
     sig = inspect.signature(mod.parse)
     accepts_flow_ctx = "flow_ctx" in sig.parameters
 
-    entry = {"module": mod, "info": info, "state": None, "accepts_flow_ctx": accepts_flow_ctx}
+    entry = {"module": mod, "info": info, "state": None,
+             "accepts_flow_ctx": accepts_flow_ctx, "discovery_hooks": None}
 
     # Optional: stateful addon with init()
     if hasattr(mod, "init"):
         entry["state"] = mod.init()
+
+    # Optional: discovery hooks for the Discovery tab
+    if hasattr(mod, "discovery_hooks") and callable(mod.discovery_hooks):
+        try:
+            hooks = mod.discovery_hooks()
+            if isinstance(hooks, dict) and "decode" in hooks:
+                entry["discovery_hooks"] = hooks
+                print(f"[PacketSpy]   -> {addon_id} has discovery hooks")
+        except Exception as e:
+            print(f"[PacketSpy]   -> {addon_id} discovery_hooks() failed: {e}")
 
     _addons[addon_id] = entry
     print(f"[PacketSpy] Loaded addon: {addon_id} ({info['name']})")
@@ -122,6 +133,30 @@ def _register_addon(addon_id, mod):
 def get_registered_addons():
     """Return dict of registered addon IDs to their info."""
     return {aid: data["info"] for aid, data in _addons.items()}
+
+
+def get_discovery_addons():
+    """Return list of addons that have discovery hooks.
+
+    Each entry: {"id": addon_id, "name": str, "protocol": str}
+    """
+    result = []
+    for addon_id, data in _addons.items():
+        if data["discovery_hooks"] is not None:
+            result.append({
+                "id": addon_id,
+                "name": data["info"]["name"],
+                "protocol": data["info"]["protocol"],
+            })
+    return result
+
+
+def get_addon_discovery_hooks(addon_id):
+    """Return the discovery hooks dict for an addon, or None."""
+    entry = _addons.get(addon_id)
+    if entry:
+        return entry["discovery_hooks"]
+    return None
 
 
 def reset_flow_tracker():
@@ -133,6 +168,7 @@ def run_addons(raw_pkt, profile):
     """Run profile-specified addons against a raw Scapy packet.
 
     Returns a list of addon results (only those that returned data).
+    Also feeds decoded payloads into the active discovery session if one exists.
     """
     from scapy.layers.inet import IP, TCP, UDP
 
@@ -206,3 +242,113 @@ def run_addons(raw_pkt, profile):
             print(f"[PacketSpy] Addon {addon_id} raised an error:\n{traceback.format_exc()}")
 
     return results
+
+
+def _feed_discovery_raw(raw_pkt):
+    """Feed raw transport payload into discovery session (no addon mode)."""
+    import time as _time
+    try:
+        from .web.routes import get_discovery_session
+    except ImportError:
+        return
+    from scapy.layers.inet import UDP, TCP
+
+    session = get_discovery_session()
+    if session is None or not session.active or session.addon_id is not None:
+        return
+
+    payload = None
+    if raw_pkt.haslayer(UDP):
+        payload = bytes(raw_pkt[UDP].payload)
+    elif raw_pkt.haslayer(TCP):
+        payload = bytes(raw_pkt[TCP].payload)
+
+    if payload and len(payload) >= 2:
+        session.ingest(payload, _time.time())
+
+
+def feed_discovery(raw_pkt, profile):
+    """Feed a packet into the active discovery session.
+
+    Called from capture/PCAP-load paths. Handles both addon and raw modes.
+    Should be called even when no profile is active.
+    """
+    import time as _time
+    try:
+        from .web.routes import get_discovery_session
+    except ImportError:
+        return
+
+    session = get_discovery_session()
+    if session is None or not session.active:
+        return
+
+    from scapy.layers.inet import IP, UDP, TCP
+
+    if session.addon_id is None:
+        # Raw mode — ingest transport payload directly
+        _feed_discovery_raw(raw_pkt)
+    elif session.addon_id in _addons:
+        # Addon mode — need to decode first
+        addon = _addons[session.addon_id]
+        addon_protocol = addon["info"]["protocol"].lower()
+
+        payload = None
+        if addon_protocol == "udp" and raw_pkt.haslayer(UDP):
+            payload = bytes(raw_pkt[UDP].payload)
+        elif addon_protocol == "tcp" and raw_pkt.haslayer(TCP):
+            payload = bytes(raw_pkt[TCP].payload)
+        elif addon_protocol == "any":
+            if raw_pkt.haslayer(UDP):
+                payload = bytes(raw_pkt[UDP].payload)
+            elif raw_pkt.haslayer(TCP):
+                payload = bytes(raw_pkt[TCP].payload)
+
+        if not payload or len(payload) < 2:
+            return
+
+        # Build packet_info for flow context
+        packet_info = {
+            "src_ip": None, "dst_ip": None,
+            "src_port": None, "dst_port": None,
+            "protocol": None,
+        }
+        if raw_pkt.haslayer(IP):
+            packet_info["src_ip"] = raw_pkt[IP].src
+            packet_info["dst_ip"] = raw_pkt[IP].dst
+        if raw_pkt.haslayer(TCP):
+            packet_info["protocol"] = "TCP"
+            packet_info["src_port"] = raw_pkt[TCP].sport
+            packet_info["dst_port"] = raw_pkt[TCP].dport
+        elif raw_pkt.haslayer(UDP):
+            packet_info["protocol"] = "UDP"
+            packet_info["src_port"] = raw_pkt[UDP].sport
+            packet_info["dst_port"] = raw_pkt[UDP].dport
+
+        flow_ctx = _flow_tracker.get_or_create(packet_info)
+
+        # If no profile is active, run parse() first so the addon can
+        # accumulate session state (e.g. CRC bytes, encode key from
+        # OP_SessionResponse) that the decode hook depends on.
+        addon_in_profile = (
+            profile and getattr(profile, "addons", None)
+            and session.addon_id in profile.addons
+        )
+        if not addon_in_profile:
+            try:
+                state = addon["state"]
+                if addon["accepts_flow_ctx"]:
+                    addon["module"].parse(payload, packet_info, state, flow_ctx=flow_ctx)
+                else:
+                    addon["module"].parse(payload, packet_info, state)
+            except Exception:
+                pass
+
+        hooks = addon["discovery_hooks"]
+        if hooks and hooks.get("decode"):
+            try:
+                clean = hooks["decode"](payload, flow_ctx)
+                if clean and len(clean) >= 2:
+                    session.ingest(clean, _time.time())
+            except Exception:
+                pass
