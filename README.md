@@ -20,6 +20,7 @@ A Windows packet sniffer that tracks network traffic by application. Create prof
 - **Real-time dashboard** — protocol breakdown, top processes, top talkers
 - **PCAP save/load** — save captures in Wireshark-compatible format and load them back for review
 - **Addon system** — pluggable protocol parsers with per-flow context and optional statefulness (e.g., EverQuest session protocol decoder with opcode labeling, CRC stripping, and decompression)
+- **Protocol discovery** — reverse-engineer unknown protocols: group packets by 2-byte opcode, auto-detect field types (floats, strings, counters, length-prefixed data), baseline diffing to isolate opcodes triggered by specific actions
 - **Browser UI** — dark-themed, tabbed interface served locally via Flask
 
 ## Quick Start
@@ -49,6 +50,7 @@ Then open http://127.0.0.1:5000
 | **By Process** | Sidebar of processes sorted by traffic, click to filter |
 | **Streams** | TCP and UDP conversations grouped by 5-tuple, with Follow Stream view |
 | **Dashboard** | Protocol bars, top processes, top talkers |
+| **Discovery** | Protocol reverse-engineering workbench — group packets by opcode, auto-detect field types, baseline diff to identify unknown opcodes |
 
 ## Packet Inspector
 
@@ -101,7 +103,7 @@ Protocol-specific parsers live in `addons/`. Addons can be a single `.py` file o
 
 **Included addon:**
 
-- `eq_session` — Parses the EverQuest (SOE) session protocol: session opcodes, sequence numbers, CRC stripping, XOR decode (encode pass 1/2), zlib decompression, fragment reassembly, and application opcode labeling using ~350 RoF2 opcode mappings. Includes decoded payload hex dump, color-coded byte regions in the raw hex dump, and a "DECRYPTED" badge when XOR decode is active.
+- `eq_session` — Parses the EverQuest (SOE) session protocol: session opcodes, sequence numbers, CRC stripping, XOR decode (encode pass 1/2), zlib decompression, fragment reassembly, and application opcode labeling via selectable opcode files. Ships with RoF2 opcode mappings (~350 opcodes); additional client versions can be added as JSON files in `opcode_files/eq_session/`. Includes decoded payload hex dump, color-coded byte regions in the raw hex dump, and a "DECRYPTED" badge when XOR decode is active. Supports the Discovery tab via `discovery_hooks()` for decoding packets through the full EQ pipeline before opcode grouping.
 
 **Writing an addon:**
 
@@ -137,6 +139,14 @@ def parse(payload_bytes, packet_info, state=None, flow_ctx=None):
 # Optional: stateful addon — return initial state
 def init():
     return {}
+
+# Optional: Discovery tab integration
+def discovery_hooks():
+    """Return hooks for the Discovery tab's protocol analysis."""
+    return {
+        "decode": my_decode_function,   # (raw_bytes, flow_ctx) -> clean_bytes | None
+        "known_opcodes": {0x01: "OP_Example"},  # opcodes to label in discovery
+    }
 ```
 
 Addons can be single files (`addons/my_addon.py`) or packages (`addons/my_addon/__init__.py` with helper modules). Add the addon ID (folder or file name without `.py`) to a profile's `addons` list.
@@ -168,6 +178,7 @@ packetspy/
     tcp_streams.py        # TCP and UDP stream tracker
     addon_loader.py       # Addon discovery and execution
     flow_context.py       # Per-flow context tracking for addons
+    discovery.py          # Protocol discovery engine (opcode grouping, field analysis, baseline diffing)
     pcap_io.py            # PCAP save/load
     web/
       __init__.py         # Flask app factory
@@ -180,11 +191,14 @@ packetspy/
   addons/
     eq_session/           # EverQuest session protocol parser (multi-file)
       __init__.py         # Addon entry point (stateful parse)
-      opcodes.py          # RoF2 opcode hex→name mapping
+      opcodes.py          # Dynamic opcode file loader
       session_state.py    # Per-flow session state tracker
       crc.py              # CRC byte stripping
       decode.py           # XOR encode pass 1/2 decoder
       decompress.py       # Zlib raw deflate wrapper
+  opcode_files/
+    eq_session/
+      RoF2.json           # RoF2 app-layer opcode mappings
   profiles/
     everquest.yaml        # EQ profile
 ```

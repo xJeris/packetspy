@@ -103,6 +103,8 @@ Both views show:
 
 **Dashboard** — Real-time statistics: total packets/bytes, throughput rate, protocol breakdown (bar chart), top processes, and top talkers (IPs by volume).
 
+**Discovery** — Protocol reverse-engineering workbench. Groups packets by their 2-byte opcode, runs heuristic field analysis, and supports baseline diffing to identify unknown opcodes. Works with addon decoding or raw payloads. Click the info button (i) on the Discovery toolbar for a detailed usage guide.
+
 ### Controls
 
 | Control | Action |
@@ -197,6 +199,73 @@ bpf_filter_override: null
 | `bpf_filter_override` | No | Manual BPF string; set `null` to auto-generate |
 
 At least one of `processes`, `ports`, `port_ranges`, or IP fields should be specified so a BPF filter can be generated. If none are set, all traffic is captured (same as no profile).
+
+---
+
+## Using the Discovery Tab
+
+The Discovery tab is a protocol reverse-engineering workbench. It helps you identify unknown packet opcodes by grouping traffic, analyzing payload structure, and comparing before/after snapshots.
+
+### Getting started with Discovery
+
+1. Switch to the **Discovery** tab
+2. Choose an addon from the dropdown (e.g., "EQ Session Protocol") or leave it on "No Addon" for raw payloads
+3. Optionally select an **Opcode File** from the second dropdown to pre-label known opcodes (e.g., "RoF2" for EverQuest RoF2 client opcodes)
+4. Click **Start Session**
+5. Start a capture or load a PCAP — packets flow into Discovery automatically
+6. The opcode table populates as packets arrive
+
+### Addon vs Raw mode
+
+- **Addon mode** decodes packets through the addon's pipeline first (e.g., CRC strip, XOR decode, decompress, defragment for EQ), then groups by the application-layer opcode. Use this when you have an addon that handles the transport layer.
+- **Raw mode** ("No Addon") groups packets by the first 2 bytes of the raw TCP/UDP payload. Use this for completely unknown protocols.
+
+### Opcode table
+
+Each row shows an opcode with its count, payload size (fixed or "var"), packets/sec rate, and auto-detected tags:
+
+- **xyz-floats** — 3 consecutive IEEE floats detected (likely coordinates)
+- **string** — null-terminated ASCII string found
+- **counter** — first 2 bytes increment by 1 across samples (sequence number)
+- **len-prefix** — 2-byte length prefix followed by that many bytes
+
+Click the **Label** field on any row to name an opcode (e.g., "PlayerPosition"). Labels save automatically and persist across sessions.
+
+Click any row to open **Field Analysis** — a byte-level structural breakdown showing fixed vs variable regions with type guesses (float, uint16, string, etc.).
+
+### Baseline diffing
+
+Baseline diffing helps you figure out which opcodes correspond to a specific action:
+
+1. With a Discovery session running, click **Start Baseline** to snapshot current opcode counts
+2. Perform an action (e.g., open inventory, cast a spell, move your character)
+3. Click **Show Diff** to see which opcodes spiked or appeared since the baseline
+4. Click **Clear Baseline** to reset and try another action
+
+### Opcode files
+
+Opcode files are JSON mappings of opcode values to human-readable names. They live in `opcode_files/<addon_id>/` (e.g., `opcode_files/eq_session/RoF2.json`). The EQ addon ships with a RoF2 opcode file containing ~350 app-layer opcode mappings.
+
+**Using an opcode file:**
+1. Select an addon in the Discovery toolbar
+2. The **Opcode File** dropdown shows available files for that addon
+3. Select a file — its opcodes appear as placeholder labels in the opcode table
+4. The same file also feeds the packet inspector, so all tabs benefit from the opcode names
+
+**Creating a new opcode file:**
+1. Run a Discovery session and label opcodes you identify
+2. Click **Save Opcodes** and enter a name (e.g., "Titanium" or "Live")
+3. The file is saved to `opcode_files/<addon_id>/<name>.json`
+4. It now appears in the dropdown for future sessions
+
+**Switching opcode files** changes which opcodes are labeled everywhere — packet detail views, Discovery tab, and stream follow views all update.
+
+### Tips
+
+- Discovery sessions run independently of the packet capture — you can start/stop them separately
+- Loading a PCAP with a Discovery session active will feed those packets into discovery
+- The EQ addon requires seeing OP_SessionResponse to learn CRC/encryption params — make sure your capture includes connection setup
+- Click the info button (i) on the Discovery toolbar for a quick reference guide
 
 ---
 
@@ -324,6 +393,7 @@ Addons are discovered at startup. After a restart you should see:
 - `ADDON_INFO` (dict, required): Must have `name` (str) and `protocol` (str)
 - `parse(payload_bytes, packet_info, state=None, flow_ctx=None)` (function, required): Must return a dict or `None`
 - `init()` (function, optional): Return a state object for stateful addons; passed as 3rd arg to `parse()`
+- `discovery_hooks()` (function, optional): Return a dict with `"decode"` (callable: `(raw_bytes, flow_ctx) -> clean_bytes | None`) and optionally `"known_opcodes"` (dict of opcode int to name string). Addons with discovery hooks appear in the Discovery tab's addon picker.
 - `flow_ctx` (optional kwarg): A `FlowContext` object automatically provided per network flow. Contains:
   - `flow_ctx.flow_key` — normalized 5-tuple identifying the flow
   - `flow_ctx.packet_count` — total packets seen in this flow
